@@ -31,9 +31,28 @@ from playwright.sync_api import sync_playwright
 from applypilot import config
 from applypilot.config import CONFIG_DIR
 from applypilot.database import get_connection, init_db, store_jobs, get_stats
-from applypilot.llm import get_client
+from applypilot.llm import ClaudeUsageLimitError, get_client
 
 log = logging.getLogger(__name__)
+
+# Non-job noise that job-board frontends fire on every page load -- these
+# match the broad "/api/" response-capture heuristic below but are never
+# job data, so they're rejected before ever reaching the LLM judge.
+_NOISE_URL_PATTERNS = (
+    "/api/auth/",
+    "/api/telemetry/",
+    "/api/analytics/",
+    "get-session",
+    "web-vitals",
+    "geolocation",
+    "onetrust.com",
+    "cookieconsent",
+)
+
+
+def _is_noise_url(url: str) -> bool:
+    lowered = url.lower()
+    return any(p in lowered for p in _NOISE_URL_PATTERNS)
 
 # Fix Windows encoding -- prevents charmap errors on emoji/unicode in job titles
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -103,6 +122,9 @@ def _store_jobs_filtered(
         url = job.get("url")
         if not url:
             continue
+        if _is_noise_url(url):
+            filtered += 1
+            continue
         if not _location_ok(job.get("location"), accept_locs, reject_locs):
             filtered += 1
             continue
@@ -144,6 +166,8 @@ def collect_page_intelligence(url: str, headless: bool = True) -> dict:
         ct = response.headers.get("content-type", "")
         rurl = response.url
         if any(ext in rurl for ext in [".js", ".css", ".png", ".jpg", ".svg", ".woff", ".ico", ".gif", ".webp"]):
+            return
+        if _is_noise_url(rurl):
             return
         if "json" in ct or "/api/" in rurl or "algolia" in rurl or "graphql" in rurl:
             try:
@@ -401,9 +425,11 @@ def judge_api_responses(api_responses: list[dict]) -> list[dict]:
                      "KEEP" if is_relevant else "DROP", reason)
             if is_relevant:
                 relevant.append(resp)
+        except ClaudeUsageLimitError as e:
+            log.error("Judge stopped -- usage limit hit: %s", e)
+            break
         except Exception as e:
-            log.warning("Judge ERROR for %s: %s -- keeping", resp.get("url", "?")[:80], e)
-            relevant.append(resp)
+            log.warning("Judge ERROR for %s: %s -- dropping", resp.get("url", "?")[:80], e)
 
     return relevant
 
