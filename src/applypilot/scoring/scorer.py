@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from applypilot.config import RESUME_PATH, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
-from applypilot.llm import get_client
+from applypilot.llm import ClaudeUsageLimitError, get_client
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +96,8 @@ def score_job(resume_text: str, job: dict) -> dict:
         client = get_client()
         response = client.chat(messages, max_tokens=512, temperature=0.2)
         return _parse_score_response(response)
+    except ClaudeUsageLimitError:
+        raise
     except Exception as e:
         log.error("LLM error scoring job '%s': %s", job.get("title", "?"), e)
         return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}"}
@@ -137,8 +139,14 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     errors = 0
     results: list[dict] = []
 
+    stopped_on_limit = False
     for job in jobs:
-        result = score_job(resume_text, job)
+        try:
+            result = score_job(resume_text, job)
+        except ClaudeUsageLimitError as e:
+            log.error("[%d/%d] [USAGE LIMIT] stopping run early -- %s", completed, len(jobs), e)
+            stopped_on_limit = True
+            break
         result["url"] = job["url"]
         completed += 1
 
@@ -162,7 +170,11 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     conn.commit()
 
     elapsed = time.time() - t0
-    log.info("Done: %d scored in %.1fs (%.1f jobs/sec)", len(results), elapsed, len(results) / elapsed if elapsed > 0 else 0)
+    log.info(
+        "Done: %d scored in %.1fs (%.1f jobs/sec)%s",
+        len(results), elapsed, len(results) / elapsed if elapsed > 0 else 0,
+        " (stopped early: usage limit hit)" if stopped_on_limit else "",
+    )
 
     # Score distribution
     dist = conn.execute("""
@@ -177,4 +189,5 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
         "errors": errors,
         "elapsed": elapsed,
         "distribution": distribution,
+        "stopped_on_limit": stopped_on_limit,
     }

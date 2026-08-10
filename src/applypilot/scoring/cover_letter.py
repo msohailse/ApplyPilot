@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
-from applypilot.llm import get_client
+from applypilot.llm import ClaudeUsageLimitError, get_client
 from applypilot.scoring.validator import (
     BANNED_WORDS,
     LLM_LEAK_PHRASES,
@@ -230,6 +230,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     completed = 0
     results: list[dict] = []
     error_count = 0
+    stopped_on_limit = False
 
     for job in jobs:
         completed += 1
@@ -268,6 +269,10 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
                 "%d/%d [OK] | %.1f jobs/min | %s",
                 completed, len(jobs), rate * 60, result["title"][:40],
             )
+        except ClaudeUsageLimitError as e:
+            log.error("%d/%d [USAGE LIMIT] stopping run early -- %s", completed, len(jobs), e)
+            stopped_on_limit = True
+            break
         except Exception as e:
             result = {
                 "url": job["url"], "title": job["title"], "site": job["site"],
@@ -296,10 +301,15 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     conn.commit()
 
     elapsed = time.time() - t0
-    log.info("Cover letters done in %.1fs: %d generated, %d errors", elapsed, saved, error_count)
+    log.info(
+        "Cover letters done in %.1fs: %d generated, %d errors%s",
+        elapsed, saved, error_count,
+        " (stopped early: usage limit hit)" if stopped_on_limit else "",
+    )
 
     return {
         "generated": saved,
         "errors": error_count,
         "elapsed": elapsed,
+        "stopped_on_limit": stopped_on_limit,
     }

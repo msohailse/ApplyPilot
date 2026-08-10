@@ -18,7 +18,7 @@ from pathlib import Path
 
 from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
-from applypilot.llm import get_client
+from applypilot.llm import ClaudeUsageLimitError, get_client
 from applypilot.scoring.validator import (
     BANNED_WORDS,
     FABRICATION_WATCHLIST,
@@ -484,6 +484,33 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
     results: list[dict] = []
     stats: dict[str, int] = {"approved": 0, "failed_validation": 0, "failed_judge": 0, "error": 0}
 
+    # Flush to DB every BATCH_SIZE jobs (instead of one commit for the whole
+    # run) so an interrupt or a hit rate limit only loses the in-progress
+    # batch, not everything already tailored.
+    BATCH_SIZE = 5
+    _success_statuses = {"approved", "approved_with_judge_warning"}
+    pending: list[dict] = []
+
+    def _flush(batch: list[dict]) -> None:
+        if not batch:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        for r in batch:
+            if r["status"] in _success_statuses:
+                conn.execute(
+                    "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
+                    "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+                    (r["path"], now, r["url"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+                    (r["url"],),
+                )
+        conn.commit()
+
+    stopped_on_limit = False
+
     for job in jobs:
         completed += 1
         try:
@@ -534,6 +561,19 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
                 "status": report["status"],
                 "attempts": report["attempts"],
             }
+        except ClaudeUsageLimitError as e:
+            # Not a per-job failure -- retrying would just burn more calls
+            # into the same wall. Flush what's already done and stop; this
+            # job's tailor_attempts is left untouched so it's retried fresh
+            # once the limit window resets.
+            log.error(
+                "%d/%d [USAGE LIMIT] stopping run early -- %s",
+                completed, len(jobs), e,
+            )
+            _flush(pending)
+            pending = []
+            stopped_on_limit = True
+            break
         except Exception as e:
             result = {
                 "url": job["url"], "title": job["title"], "site": job["site"],
@@ -542,6 +582,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
 
         results.append(result)
+        pending.append(result)
         stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
 
         elapsed = time.time() - t0
@@ -555,31 +596,19 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             result["title"][:40],
         )
 
-    # Persist to DB: increment attempt counter for ALL, save path only for approved
-    now = datetime.now(timezone.utc).isoformat()
-    _success_statuses = {"approved", "approved_with_judge_warning"}
-    for r in results:
-        if r["status"] in _success_statuses:
-            conn.execute(
-                "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
-                "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
-            )
-        else:
-            conn.execute(
-                "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["url"],),
-            )
-    conn.commit()
+        if len(pending) >= BATCH_SIZE or completed == len(jobs):
+            _flush(pending)
+            pending = []
 
     elapsed = time.time() - t0
     log.info(
-        "Tailoring done in %.1fs: %d approved, %d failed_validation, %d failed_judge, %d errors",
+        "Tailoring done in %.1fs: %d approved, %d failed_validation, %d failed_judge, %d errors%s",
         elapsed,
         stats.get("approved", 0),
         stats.get("failed_validation", 0),
         stats.get("failed_judge", 0),
         stats.get("error", 0),
+        " (stopped early: usage limit hit)" if stopped_on_limit else "",
     )
 
     return {
@@ -587,4 +616,5 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
         "failed": stats.get("failed_validation", 0) + stats.get("failed_judge", 0),
         "errors": stats.get("error", 0),
         "elapsed": elapsed,
+        "stopped_on_limit": stopped_on_limit,
     }
