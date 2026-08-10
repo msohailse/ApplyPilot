@@ -22,6 +22,34 @@ import httpx
 
 log = logging.getLogger(__name__)
 
+
+class ClaudeUsageLimitError(RuntimeError):
+    """Raised when the `claude` CLI reports a usage/rate limit, not a transient failure.
+
+    Distinguished from other CLI failures (bad prompt, malformed output, timeout)
+    so callers can stop a batch run immediately instead of burning retries into
+    a wall that won't clear until the limit window resets.
+    """
+
+
+# Substrings the `claude` CLI itself checks for when classifying provider
+# errors (see its own "Anthropic API:" error list) — matched case-insensitively
+# against stderr/result text to tell a real limit from any other failure.
+_USAGE_LIMIT_INDICATORS = (
+    "usage limit reached",
+    "rate limited",
+    "rate limit",
+    "credit balance too low",
+    "overloaded",
+    "429",
+    "529",
+)
+
+
+def _is_usage_limit_message(text: str) -> bool:
+    lowered = text.lower()
+    return any(indicator in lowered for indicator in _USAGE_LIMIT_INDICATORS)
+
 # ---------------------------------------------------------------------------
 # Provider detection
 # ---------------------------------------------------------------------------
@@ -87,6 +115,14 @@ def _detect_provider() -> tuple[str, str, str]:
 _MAX_RETRIES = 5
 _TIMEOUT = 120  # seconds
 
+# Hard cap on `claude` CLI calls for a single `applypilot run` process,
+# shared across every stage (score/judge/tailor/cover all route through the
+# same LLMClient singleton). Once hit, the next call raises instead of
+# spawning a subprocess, so a bad batch (e.g. junk scraped "jobs") can't
+# burn through the whole 5-hour subscription window unattended. There's no
+# real usage/quota API to read, so this is a local proxy, not a true count.
+_CLAUDE_CLI_CALL_BUDGET = int(os.environ.get("CLAUDE_CLI_CALL_BUDGET", "40"))
+
 # Base wait on first 429/503 (doubles each retry, caps at 60s).
 # Gemini free tier is 15 RPM = 4s minimum between requests; 10s gives headroom.
 _RATE_LIMIT_BASE_WAIT = 10
@@ -96,7 +132,7 @@ _GEMINI_COMPAT_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 _GEMINI_NATIVE_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _ANTHROPIC_BASE = "https://api.anthropic.com/v1"
 _CLAUDE_CLI_MARKER = "claude-cli"  # not a real URL — signals the subprocess path
-_CLAUDE_CLI_TIMEOUT = 120  # seconds
+_CLAUDE_CLI_TIMEOUT = 240  # seconds
 
 
 class LLMClient:
@@ -118,6 +154,8 @@ class LLMClient:
         self._is_gemini: bool = base_url.startswith(_GEMINI_COMPAT_BASE)
         self._is_anthropic: bool = base_url == _ANTHROPIC_BASE
         self._is_claude_cli: bool = base_url == _CLAUDE_CLI_MARKER
+        self.claude_cli_call_count = 0
+        self.claude_cli_call_budget = _CLAUDE_CLI_CALL_BUDGET
 
     # -- Native Gemini API --------------------------------------------------
 
@@ -225,6 +263,13 @@ class LLMClient:
         single-turn). `--disallowedTools *` keeps this a pure text
         completion — no file/bash access.
         """
+        if self.claude_cli_call_count >= self.claude_cli_call_budget:
+            raise ClaudeUsageLimitError(
+                f"Local call budget exhausted ({self.claude_cli_call_count}/{self.claude_cli_call_budget} "
+                "calls this run) -- stopping before another CLI call to protect the 5-hour usage window. "
+                "Set CLAUDE_CLI_CALL_BUDGET to raise it."
+            )
+
         system_text = "\n".join(msg.get("content", "") for msg in messages if msg["role"] == "system")
         turns = [msg for msg in messages if msg["role"] != "system"]
         prompt = (
@@ -233,23 +278,40 @@ class LLMClient:
             else "\n\n".join(f"{msg['role']}: {msg['content']}" for msg in turns)
         )
 
+        # --disallowedTools takes a variadic list ("<tools...>") and swallows
+        # every bare argument after it, including a trailing prompt — so the
+        # prompt is sent via stdin instead of as a positional arg.
         cmd = ["claude", "-p", "--model", self.model, "--output-format", "json", "--disallowedTools", "*"]
         if system_text:
             cmd += ["--system-prompt", system_text]
-        cmd.append(prompt)
+
+        # ANTHROPIC_API_KEY in the subprocess env makes the CLI prefer that
+        # (metered) auth source over the claude.ai subscription login this
+        # path is meant to use, which it then refuses to do — unset it here.
+        cli_env = os.environ.copy()
+        cli_env.pop("ANTHROPIC_API_KEY", None)
 
         result = subprocess.run(
             cmd,
+            input=prompt,
             capture_output=True,
             text=True,
             timeout=_CLAUDE_CLI_TIMEOUT,
             check=False,
+            env=cli_env,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"claude CLI exited {result.returncode}: {result.stderr[:300]}")
+            msg = f"claude CLI exited {result.returncode}: {result.stderr[:300]}"
+            if _is_usage_limit_message(result.stderr):
+                raise ClaudeUsageLimitError(msg)
+            raise RuntimeError(msg)
         data = json.loads(result.stdout)
         if data.get("is_error"):
-            raise RuntimeError(f"claude CLI error: {data.get('result', 'unknown')}")
+            msg = f"claude CLI error: {data.get('result', 'unknown')}"
+            if _is_usage_limit_message(str(data.get("result", ""))):
+                raise ClaudeUsageLimitError(msg)
+            raise RuntimeError(msg)
+        self.claude_cli_call_count += 1
         return data["result"]
 
     # -- OpenAI-compat API --------------------------------------------------
