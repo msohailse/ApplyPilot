@@ -158,6 +158,17 @@ _ALL_COLUMNS: dict[str, str] = {
     "application_url": "TEXT",
     "detail_scraped_at": "TEXT",
     "detail_error": "TEXT",
+    # Classification (derived from description)
+    "language_requirement": "TEXT",
+    "employment_type": "TEXT",
+    "country": "TEXT",
+    "work_mode": "TEXT",
+    # User notes
+    "notes": "TEXT",
+    # "Role to be studied" note (marks a job as a learning/role-model target)
+    "study_note": "TEXT",
+    # Company name (employer), separate from `site` (job board / source)
+    "company": "TEXT",
     # Scoring
     "fit_score": "INTEGER",
     "score_reasoning": "TEXT",
@@ -422,3 +433,65 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
         columns = rows[0].keys()
         return [dict(zip(columns, row)) for row in rows]
     return []
+
+
+# Manual triage statuses settable from the dashboard.
+MANUAL_STATUSES = ("applied", "not_available", "not_interested", "failed")
+
+
+def set_job_status(url: str, status: str, reason: str | None = None) -> None:
+    """Set a job's manual apply status.
+
+    Args:
+        url: Job URL to update.
+        status: One of "applied", "not_available", "not_interested", "failed",
+            or "reset" to clear the status back to not-applied.
+        reason: Optional note stored in apply_error.
+    """
+    conn = get_connection()
+    now = datetime.now(timezone.utc).isoformat()
+
+    if status == "applied":
+        conn.execute(
+            "UPDATE jobs SET apply_status = 'applied', applied_at = ?, "
+            "apply_error = NULL WHERE url = ?",
+            (now, url),
+        )
+    elif status in ("not_available", "not_interested", "failed"):
+        conn.execute(
+            "UPDATE jobs SET apply_status = ?, apply_error = ?, "
+            "applied_at = NULL WHERE url = ?",
+            (status, reason or status, url),
+        )
+    else:  # "reset" (or any unknown) -> clear
+        conn.execute(
+            "UPDATE jobs SET apply_status = NULL, apply_error = NULL, "
+            "applied_at = NULL, apply_attempts = 0 WHERE url = ?",
+            (url,),
+        )
+    conn.commit()
+
+
+def set_job_note(url: str, note: str) -> None:
+    """Save a free-text note for a job."""
+    conn = get_connection()
+    conn.execute("UPDATE jobs SET notes = ? WHERE url = ?", (note or "", url))
+    conn.commit()
+
+
+def set_job_study(url: str, note: str) -> None:
+    """Mark/update a job as a 'role to study' with a note (blank clears it)."""
+    conn = get_connection()
+    conn.execute("UPDATE jobs SET study_note = ? WHERE url = ?", (note or "", url))
+    conn.commit()
+
+
+def get_study_jobs(conn=None) -> list[dict]:
+    """Return jobs marked as 'role to study' (non-empty study_note)."""
+    conn = conn or get_connection()
+    rows = conn.execute(
+        "SELECT url, title, company, site, fit_score, study_note FROM jobs "
+        "WHERE study_note IS NOT NULL AND trim(study_note) != '' "
+        "ORDER BY fit_score DESC NULLS LAST, title"
+    ).fetchall()
+    return [dict(r) for r in rows]

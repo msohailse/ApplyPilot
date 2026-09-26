@@ -25,13 +25,23 @@ log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 5  # max cross-run retries before giving up
 
+# Location hints used to decide when the work-status note is relevant.
+_EUROPE_HINTS = (
+    "norway", "norge", "tromsø", "tromso", "oslo", "bergen", "trondheim",
+    "sweden", "denmark", "finland", "germany", "netherlands", "ireland",
+    "united kingdom", "uk", "france", "spain", "portugal", "italy", "italia",
+    "belgium", "austria", "switzerland", "poland", "czech", "europe", "emea",
+)
+
 
 # ── Prompt Builder (profile-driven) ──────────────────────────────────────
 
-def _build_cover_letter_prompt(profile: dict) -> str:
+def _build_cover_letter_prompt(profile: dict, job: dict | None = None) -> str:
     """Build the cover letter system prompt from the user's profile.
 
     All personal data, skills, and sign-off name come from the profile.
+    When the job is based in Europe, the profile's work-status
+    note is woven into the closing paragraph.
     """
     personal = profile.get("personal", {})
     boundary = profile.get("skills_boundary", {})
@@ -65,6 +75,20 @@ def _build_cover_letter_prompt(profile: dict) -> str:
     all_banned = ", ".join(f'"{w}"' for w in BANNED_WORDS)
     leak_banned = ", ".join(f'"{p}"' for p in LLM_LEAK_PHRASES)
 
+    # Work-status / availability note — only for roles based in Europe.
+    availability_note = ""
+    note = (profile.get("work_authorization", {}) or {}).get("note", "").strip()
+    if note and job is not None:
+        loc = f"{job.get('location') or ''} {job.get('country') or ''}".lower()
+        is_europe = any(k in loc for k in _EUROPE_HINTS)
+        if is_europe:
+            availability_note = (
+                "\n\nAVAILABILITY CONTEXT (the role is based in Europe, so include this):\n"
+                f"{note}\n"
+                "Weave ONE clear, natural sentence about this into the closing paragraph. "
+                "Do not add a new paragraph and do not exceed the 3-paragraph structure."
+            )
+
     return f"""Write a cover letter for {sign_off_name}. The goal is to get an interview.
 
 STRUCTURE: 3 short paragraphs. Under 250 words. Every sentence must earn its place.
@@ -73,7 +97,7 @@ PARAGRAPH 1 (2-3 sentences): Open with a specific thing YOU built that solves TH
 
 PARAGRAPH 2 (3-4 sentences): Pick 2 achievements from the resume that are MOST relevant to THIS job. Use numbers. Frame as solving their problem, not listing your accomplishments.{projects_hint}{metrics_hint}
 
-PARAGRAPH 3 (1-2 sentences): One specific thing about the company from the job description (a product, a technical challenge, a team structure). Then close. "Happy to walk through any of this in more detail." or "Let's discuss." Nothing else.
+PARAGRAPH 3 (1-2 sentences): One specific thing about the company from the job description (a product, a technical challenge, a team structure). Then close. "Happy to walk through any of this in more detail." or "Let's discuss." Nothing else.{availability_note}
 
 BANNED WORDS AND PHRASES (automated validator rejects ANY of these — do not use even once):
 {all_banned}
@@ -93,6 +117,8 @@ VOICE:
 FABRICATION = INSTANT REJECTION:
 The candidate's real tools are ONLY: {skills_str}.
 Do NOT mention ANY tool not in this list. If the job asks for tools not listed, talk about the work you did, not the tools.
+
+LANGUAGE: Never mention language requirements or language proficiency. Do NOT name any language the job asks for and do NOT claim fluency in any language. Ignore language requirements from the posting entirely.
 
 Sign off: just "{sign_off_name}"
 
@@ -145,8 +171,8 @@ def generate_cover_letter(
 
     avoid_notes: list[str] = []
     letter = ""
-    client = get_client()
-    cl_prompt_base = _build_cover_letter_prompt(profile)
+    client = get_client("cover")
+    cl_prompt_base = _build_cover_letter_prompt(profile, job)
 
     for attempt in range(max_retries + 1):
         # Fresh conversation every attempt
@@ -230,6 +256,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     completed = 0
     results: list[dict] = []
     error_count = 0
+    saved = 0
 
     for job in jobs:
         completed += 1
@@ -277,23 +304,20 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
             results.append(result)
             log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
 
-    # Persist to DB: increment attempt counter for ALL, save path only for successes
-    now = datetime.now(timezone.utc).isoformat()
-    saved = 0
-    for r in results:
-        if r.get("path"):
+        # Persist immediately so progress survives an interruption.
+        if result.get("path"):
             conn.execute(
                 "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, "
                 "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
+                (result["path"], datetime.now(timezone.utc).isoformat(), result["url"]),
             )
             saved += 1
         else:
             conn.execute(
                 "UPDATE jobs SET cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-                (r["url"],),
+                (result["url"],),
             )
-    conn.commit()
+        conn.commit()
 
     elapsed = time.time() - t0
     log.info("Cover letters done in %.1fs: %d generated, %d errors", elapsed, saved, error_count)

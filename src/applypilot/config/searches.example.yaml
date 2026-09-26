@@ -1,112 +1,170 @@
 # ApplyPilot search configuration
-# Copy to ~/.applypilot/searches.yaml and customize for your job search.
-# The wizard (applypilot init) generates a basic version automatically.
+# Priority 1: remote full-time roles in the United States and Canada.
+# Priority 2: remote part-time roles across Europe, with Norway searched first.
+#
+# A listing is excluded only when it explicitly requires existing local work
+# authorization or says that visa sponsorship is unavailable. Ambiguous
+# listings remain available for manual eligibility review.
 
-# Search queries -- each has a query string and priority tier.
-# Tier 1: High-priority exact matches (searched first, highest precision)
-# Tier 2: Strong matches, broader scope
-# Tier 3: Wide net, high volume, lower precision
-queries:
-  - query: "software engineer"
-    tier: 1
-  - query: "backend engineer"
-    tier: 1
-  - query: "backend developer"
-    tier: 1
-  - query: "full stack developer"
-    tier: 2
-  - query: "full stack engineer"
-    tier: 2
-  - query: "python developer"
-    tier: 2
-  - query: "python engineer"
-    tier: 2
-  - query: "DevOps engineer"
-    tier: 2
-  - query: "site reliability engineer"
-    tier: 2
-  - query: "platform engineer"
-    tier: 2
-  - query: "cloud engineer"
-    tier: 2
-  - query: "data engineer"
-    tier: 2
-  - query: "infrastructure engineer"
-    tier: 2
-  - query: "software developer"
-    tier: 3
-  - query: "developer"
-    tier: 3
-  - query: "systems engineer"
-    tier: 3
-  - query: "automation engineer"
-    tier: 3
-  - query: "solutions engineer"
-    tier: 3
-  - query: "integration engineer"
-    tier: 3
-  - query: "ML engineer"
-    tier: 3
-  - query: "machine learning engineer"
-    tier: 3
-  - query: "AI engineer"
-    tier: 3
-  - query: "security engineer"
-    tier: 3
+defaults:
+  distance: 0
+  hours_old: 72
+  results_per_site: 50
 
-# Locations to search
-locations:
-  - location: "San Francisco, CA"
-    remote: false
-  - location: "Remote"
-    remote: true
-
-# Location filtering -- accept/reject patterns for job location text
-location:
-  accept_patterns:
-    - "San Francisco"
-    - "Bay Area"
-    - "SF"
-    - "California"
-    - "CA"
-    - "Remote"
-    - "Anywhere"
-    - "United States"
-    - "US"
-    - "USA"
-  reject_patterns:
-    - "New York only"
-    - "Seattle only"
-    - "onsite only"
-    - "London, UK"
-    - "India"
-    - "Philippines"
-
-# Country for Indeed/LinkedIn/Google Jobs searches
-country: "USA"
-
-# JobSpy source boards (all available options shown)
-boards:
+sites:
   - indeed
   - linkedin
-  - glassdoor
   - zip_recruiter
-  - google
 
-# Search defaults
-defaults:
-  results_per_site: 100  # Max results per board per query
-  hours_old: 72          # Only jobs posted within this many hours
+locations:
+  - label: "US Remote"
+    location: "United States"
+    remote: true
+    job_type: "fulltime"
+    country_indeed: "usa"
+  - label: "Canada Remote"
+    location: "Canada"
+    remote: true
+    job_type: "fulltime"
+    country_indeed: "canada"
+  - label: "Norway Part-Time Remote"
+    location: "Norway"
+    remote: true
+    job_type: "parttime"
+    country_indeed: "norway"
+  - label: "Sweden Part-Time Remote"
+    location: "Sweden"
+    remote: true
+    job_type: "parttime"
+    country_indeed: "sweden"
+  - label: "Denmark Part-Time Remote"
+    location: "Denmark"
+    remote: true
+    job_type: "parttime"
+    country_indeed: "denmark"
+  - label: "Finland Part-Time Remote"
+    location: "Finland"
+    remote: true
+    job_type: "parttime"
+    country_indeed: "finland"
+  - label: "Germany Part-Time Remote"
+    location: "Germany"
+    remote: true
+    job_type: "parttime"
+    country_indeed: "germany"
+  - label: "Netherlands Part-Time Remote"
+    location: "Netherlands"
+    remote: true
+    job_type: "parttime"
+    country_indeed: "netherlands"
+  - label: "Ireland Part-Time Remote"
+    location: "Ireland"
+    remote: true
+    job_type: "parttime"
+    country_indeed: "ireland"
+  - label: "United Kingdom Part-Time Remote"
+    location: "United Kingdom"
+    remote: true
+    job_type: "parttime"
+    country_indeed: "united kingdom"
+  - label: "France Part-Time Remote"
+    location: "France"
+    remote: true
+    job_type: "parttime"
+    country_indeed: "france"
+  - label: "Spain Part-Time Remote"
+    location: "Spain"
+    remote: true
+    job_type: "parttime"
+    country_indeed: "spain"
+  - label: "Portugal Part-Time Remote"
+    location: "Portugal"
+    remote: true
+    job_type: "parttime"
+    country_indeed: "portugal"
+  - label: "Italy Part-Time Remote"
+    location: "Italy"
+    remote: true
+    job_type: "parttime"
+    country_indeed: "italy"
 
-# Negative keywords -- skip jobs with these in the title (case-insensitive)
+# Remote jobs are always retained. These patterns only permit non-remote jobs
+# in the European fallback regions.
+location_accept:
+  - "norway"
+  - "norge"
+  - "sweden"
+  - "denmark"
+  - "finland"
+  - "germany"
+  - "netherlands"
+  - "ireland"
+  - "united kingdom"
+  - "uk"
+  - "france"
+  - "spain"
+  - "portugal"
+  - "italy"
+  - "italia"
+  - "europe"
+  - "emea"
+location_reject_non_remote: []
+
+queries:
+  - query: "Backend Engineer"
+    tier: 1
+    location_labels: ["US Remote", "Canada Remote"]
+  - query: "Full Stack Developer"
+    tier: 1
+    location_labels: ["US Remote", "Canada Remote"]
+  - query: "Software Engineer"
+    tier: 1
+    location_labels: ["US Remote", "Canada Remote"]
+  - query: "Python Developer"
+    tier: 1
+    location_labels: ["US Remote", "Canada Remote"]
+  - query: "Part Time Backend Engineer"
+    tier: 2
+    location_labels: &europe_part_time_locations
+      - "Norway Part-Time Remote"
+      - "Sweden Part-Time Remote"
+      - "Denmark Part-Time Remote"
+      - "Finland Part-Time Remote"
+      - "Germany Part-Time Remote"
+      - "Netherlands Part-Time Remote"
+      - "Ireland Part-Time Remote"
+      - "United Kingdom Part-Time Remote"
+      - "France Part-Time Remote"
+      - "Spain Part-Time Remote"
+      - "Portugal Part-Time Remote"
+      - "Italy Part-Time Remote"
+  - query: "Part Time Full Stack Developer"
+    tier: 2
+    location_labels: *europe_part_time_locations
+  - query: "Part Time Software Engineer"
+    tier: 2
+    location_labels: *europe_part_time_locations
+
+# Workday searches tier 1-2 queries against the configured employer registry.
+workday_max_tier: 2
+workday_location_filter: true
+
+# Skip jobs only when the listing explicitly says a local work authorisation
+# or an employer-sponsored visa is mandatory/unavailable. This cannot confirm
+# immigration eligibility; always verify the full listing before applying.
+exclude_description_patterns:
+  - "no visa sponsorship"
+  - "cannot provide visa sponsorship"
+  - "will not sponsor visas"
+  - "must be authorized to work in the united states"
+  - "must be authorised to work in the united kingdom"
+  - "must have authorization to work in canada"
+  - "eligible to work in the united states without sponsorship"
+  - "eligible to work in canada without sponsorship"
+
 exclude_titles:
-  - "senior director"
-  - "VP "
-  - "vice president"
-  - "chief"
   - "intern"
   - "internship"
   - "co-op"
   - "clearance required"
   - "TS/SCI"
-  - "principal scientist"

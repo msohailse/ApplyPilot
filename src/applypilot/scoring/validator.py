@@ -123,11 +123,19 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     # Collect all text for bulk checks
     all_text_parts: list[str] = [data["summary"]]
 
-    # Skills: check for fabrication (always enforced)
+    # Skills: check for fabrication (always enforced).
+    # The watchlist is generic, so skills the user actually claims in their
+    # profile must be exempt or their own stack reads as fabricated.
     if isinstance(data["skills"], dict):
         skills_text = " ".join(str(v) for v in data["skills"].values()).lower()
+        owned = _build_skills_set(profile)
+        # Match whole skill names only: "Scalability" must not exempt "scala".
+        owned_tokens = {t for skill in owned for t in re.split(r"[^a-z0-9+#.]+", skill) if t}
+        owned_tokens |= owned
         for fake in FABRICATION_WATCHLIST:
             if len(fake) <= 2:
+                continue
+            if fake in owned_tokens:
                 continue
             if fake in skills_text:
                 errors.append(f"Fabricated skill: '{fake}'")

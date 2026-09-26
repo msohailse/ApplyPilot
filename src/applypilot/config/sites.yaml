@@ -52,9 +52,60 @@ base_urls:
   "Himalayas": "https://himalayas.app"
   "Techstars Jobs": "https://www.techstars.com"
   "Randstad Canada": "https://www.randstad.ca/jobs/search/"
+  "osapiens": "https://careers.osapiens.com"
+  "Prosper AI": "https://job-boards.greenhouse.io"
+  "Mind Robotics": "https://jobs.ashbyhq.com"
+  "Dominion Dynamics": "https://www.defendthedominion.com"
+  "Fleet Artificial Intelligence": "https://www.fleetai.com"
+  "NewCore": "https://newcore-identity.careers.hibob.com"
+  "White Circle": "https://jobs.ashbyhq.com"
+  "Corgi": "https://jobs.ashbyhq.com"
+  "GridCARE": "https://jobs.ashbyhq.com"
+  "Klir": "https://apply.klir.io"
+  "Bespoke Labs": "https://jobs.ashbyhq.com"
+  "Conduct": "https://jobs.ashbyhq.com"
+  "OpenArt AI": "https://jobs.ashbyhq.com"
+  "fonio.ai": "https://jobs.ashbyhq.com"
+  "Hilbert": "https://jobs.ashbyhq.com"
+  "Phonely": "https://jobs.ashbyhq.com"
+  "Monaco": "https://jobs.ashbyhq.com"
+  "Armadin": "https://www.armadin.com"
+  "Mercor": "https://jobs.ashbyhq.com"
+  "Inertia": "https://inertia.com"
+  "AfterQuery": "https://jobs.ashbyhq.com"
+  "Hark": "https://job-boards.greenhouse.io"
+  "Revspot": "https://revspot.ai"
+  "Bolna": "https://jobs.ashbyhq.com"
+  "Ollama": "https://jobs.ashbyhq.com"
+  "Parallel Web Systems": "https://parallel.ai"
+  "Nscale": "https://job-boards.eu.greenhouse.io"
+  "Cowboy Space": "https://jobs.ashbyhq.com"
+  "Fundamental": "https://fundamental.tech"
+  "Fluidstack": "https://careers.fluidstack.io"
+  "Strala": "https://www.strala.ai"
+  "Jetson": "https://jetsonhome.com"
+  "Pillar": "https://jobs.ashbyhq.com"
+  "Bobyard": "https://jobs.ashbyhq.com"
+  "Gimlet Labs": "https://jobs.ashbyhq.com"
 
 sites:
   # ── Searchable sites (URL includes query + location params) ──────────
+  # Norway-specific
+  # FINN.no Jobb is intentionally excluded: its robots.txt prohibits
+  # automated crawling without explicit written permission.
+
+  - name: "NAV Arbeidsplassen"
+    url: "https://arbeidsplassen.nav.no/stillinger?q={query_encoded}"
+    type: search
+
+  - name: "Jobbnorge"
+    url: "https://www.jobbnorge.no/en/vacancies?Keywords={query_encoded}"
+    type: search
+
+  - name: "Karrierestart"
+    url: "https://karrierestart.no/ledige-stillinger?q={query_encoded}"
+    type: search
+
   # Canada-specific
   - name: "Eluta"
     url: "https://www.eluta.ca/search?q={query_encoded}&l={location_encoded}"
@@ -179,3 +230,230 @@ sites:
   - name: "Otta"
     url: "https://otta.com/jobs/all?title=software+engineer&remote=true"
     type: search
+
+  # ── Single-company career pages ───────────────────────────────────────
+  - name: "osapiens"
+    url: "https://careers.osapiens.com/"
+    type: static
+
+  - name: "Prosper AI"
+    url: "https://job-boards.greenhouse.io/prosperhealth"
+    type: static
+
+  - name: "Mind Robotics"
+    url: "https://jobs.ashbyhq.com/mindrobotics"
+    type: static
+
+  - name: "Dominion Dynamics"
+    url: "https://www.defendthedominion.com/careers"
+    type: static
+
+  - name: "Fleet Artificial Intelligence"
+    url: "https://www.fleetai.com/careers"
+    type: static
+
+  - name: "NewCore"
+    url: "https://newcore-identity.careers.hibob.com"
+    type: static
+
+  - name: "White Circle"
+    url: "https://jobs.ashbyhq.com/whitecircle"
+    type: static
+
+  - name: "Corgi"
+    url: "https://jobs.ashbyhq.com/corgi"
+    type: static
+
+  - name: "GridCARE"
+    url: "https://jobs.ashbyhq.com/gridcare"
+    type: static
+
+  - name: "Klir"
+    url: "https://apply.klir.io/jobs/Careers"
+    type: static
+
+  - name: "Bespoke Labs"
+    url: "https://jobs.ashbyhq.com/bespokelabs"
+    type: static
+
+  - name: "Conduct"
+    url: "https://jobs.ashbyhq.com/conduct"
+    type: static
+
+  - name: "OpenArt AI"
+    url: "https://jobs.ashbyhq.com/openart"
+    type: static
+
+  - name: "fonio.ai"
+    url: "https://jobs.ashbyhq.com/Fonio"
+    type: static
+
+  - name: "Hilbert"
+    url: "https://jobs.ashbyhq.com/hilberts"
+    type: static
+
+  - name: "Phonely"
+    url: "https://jobs.ashbyhq.com/phonely"
+    type: static
+
+  - name: "Monaco"
+    url: "https://jobs.ashbyhq.com/monaco"
+    type: static
+
+  - name: "Armadin"
+    url: "https://www.armadin.com/careers"
+    type: static
+
+  - name: "Mercor"
+    url: "https://jobs.ashbyhq.com/mercor"
+    type: static
+
+  - name: "Inertia"
+    url: "https://inertia.com/jobs"
+    type: static
+
+  - name: "AfterQuery"
+    url: "https://jobs.ashbyhq.com/AfterQuery"
+    type: static
+
+  - name: "Hark"
+    url: "https://job-boards.greenhouse.io/hark"
+    type: static
+
+  - name: "Revspot"
+    url: "https://revspot.ai/careers.html"
+    type: static
+
+  - name: "Bolna"
+    url: "https://jobs.ashbyhq.com/bolna"
+    type: static
+
+  - name: "Ollama"
+    url: "https://jobs.ashbyhq.com/ollama"
+    type: static
+
+  - name: "Parallel Web Systems"
+    url: "https://parallel.ai/careers"
+    type: static
+
+  - name: "Nscale"
+    url: "https://job-boards.eu.greenhouse.io/nscaleoperationsukltd"
+    type: static
+
+  - name: "Cowboy Space"
+    url: "https://jobs.ashbyhq.com/cowboyspace"
+    type: static
+
+  # Prometheus (Bezos-backed, stealth mode) — no public job board found, skipped
+
+  - name: "Fundamental"
+    url: "https://fundamental.tech/careers"
+    type: static
+
+  - name: "Fluidstack"
+    url: "https://careers.fluidstack.io/"
+    type: static
+
+  - name: "Strala"
+    url: "https://www.strala.ai/job-openings"
+    type: static
+
+  - name: "Jetson"
+    url: "https://jetsonhome.com/us/careers"
+    type: static
+
+  # Pillar (construction platform) — name is ambiguous (NY safety-IoT firm vs.
+  # Milan fintech, neither cleanly matches "North America/Tel Aviv"); verify
+  # before relying on this URL.
+  - name: "Pillar"
+    url: "https://jobs.ashbyhq.com/pillar"
+    type: static
+
+  - name: "Bobyard"
+    url: "https://jobs.ashbyhq.com/bobyard"
+    type: static
+
+  - name: "Gimlet Labs"
+    url: "https://jobs.ashbyhq.com/gimlet"
+    type: static
+
+  # ── 2026 funded-startup career boards (Ashby) ────────────────────────
+  - name: "Watney"
+    url: "https://jobs.ashbyhq.com/watney"
+    type: static
+
+  - name: "Archy"
+    url: "https://jobs.ashbyhq.com/archy"
+    type: static
+
+  - name: "Maven Robotics"
+    url: "https://jobs.ashbyhq.com/maven"
+    type: static
+
+  - name: "Flagler Health"
+    url: "https://jobs.ashbyhq.com/flaglerhealth"
+    type: static
+
+  - name: "Conveo"
+    url: "https://jobs.ashbyhq.com/conveo"
+    type: static
+
+  - name: "Firecrawl"
+    url: "https://jobs.ashbyhq.com/firecrawl"
+    type: static
+
+  - name: "Pearl"
+    url: "https://jobs.ashbyhq.com/pearl"
+    type: static
+
+  - name: "Reducto"
+    url: "https://jobs.ashbyhq.com/reducto"
+    type: static
+
+  - name: "Persona"
+    url: "https://jobs.ashbyhq.com/persona"
+    type: static
+
+  - name: "Callosum"
+    url: "https://jobs.ashbyhq.com/callosum"
+    type: static
+
+  - name: "Heaviside Industries"
+    url: "https://jobs.ashbyhq.com/heaviside"
+    type: static
+
+  - name: "Rillet"
+    url: "https://jobs.ashbyhq.com/rillet"
+    type: static
+
+  - name: "Prefect"
+    url: "https://jobs.ashbyhq.com/prefect"
+    type: static
+
+  - name: "Blacksmith"
+    url: "https://jobs.ashbyhq.com/blacksmith"
+    type: static
+
+  # ── 2026 funded-startup career boards (Greenhouse) ───────────────────
+  - name: "HiddenLayer"
+    url: "https://job-boards.greenhouse.io/hiddenlayer"
+    type: static
+
+  - name: "Capacity"
+    url: "https://job-boards.greenhouse.io/capacity"
+    type: static
+
+  - name: "Nuance Labs"
+    url: "https://job-boards.greenhouse.io/nuancelabs"
+    type: static
+
+  - name: "Hopscotch Primary Care"
+    url: "https://job-boards.greenhouse.io/hopscotchprimarycare"
+    type: static
+
+  # ── Login-gated boards (need the logged-in Chrome profile) ───────────
+  # Requires `use_profile: true` in searches.yaml, and logging into the site
+  # once in your Chrome so the copied profile has the session.
+  - name: "Nettowork"
+    url: "https://app.nettowork.it/"
+    type: static

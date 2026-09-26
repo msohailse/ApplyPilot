@@ -16,6 +16,7 @@ from jobspy import scrape_jobs
 
 from applypilot import config
 from applypilot.database import get_connection, init_db, store_jobs
+from applypilot.enrichment.classify import classify_job, is_remote_only_violation
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +107,10 @@ def _location_ok(location: str | None, accept: list[str], reject: list[str]) -> 
         if r.lower() in loc:
             return False
 
+    # Wildcard: accept all non-remote locations (country-level rules apply later)
+    if "*" in accept:
+        return True
+
     # Accept matches
     for a in accept:
         if a.lower() in loc:
@@ -122,6 +127,7 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
     now = datetime.now(timezone.utc).isoformat()
     new = 0
     existing = 0
+    remote_only = config.load_search_config().get("remote_only_countries", [])
 
     for _, row in df.iterrows():
         url = str(row.get("job_url", ""))
@@ -166,13 +172,24 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
         # Extract apply URL if JobSpy provided it
         apply_url = str(row.get("job_url_direct", "")) if str(row.get("job_url_direct", "")) != "nan" else None
 
+        # Classify language / employment type / country / work mode up front
+        tags = classify_job(
+            title=title, location=location_str,
+            full_description=full_description, description=description,
+        )
+        if is_remote_only_violation(tags.get("country"), tags.get("work_mode"), remote_only):
+            continue
+
         try:
             conn.execute(
                 "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at, "
-                "full_description, application_url, detail_scraped_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "full_description, application_url, detail_scraped_at, "
+                "language_requirement, employment_type, country, work_mode, company) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (url, title, salary, description, location_str, site_label, strategy, now,
-                 full_description, apply_url, detail_scraped_at),
+                 full_description, apply_url, detail_scraped_at,
+                 tags["language_requirement"], tags["employment_type"],
+                 tags["country"], tags["work_mode"], company),
             )
             new += 1
         except sqlite3.IntegrityError:
@@ -186,6 +203,7 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
 
 def _run_one_search(
     search: dict,
+    search_cfg: dict,
     sites: list[str],
     results_per_site: int,
     hours_old: int,
@@ -218,11 +236,13 @@ def _run_one_search(
             "results_wanted": results_per_site,
             "hours_old": hours_old,
             "description_format": "markdown",
-            "country_indeed": defaults.get("country_indeed", "usa"),
+            "country_indeed": s.get("country_indeed") or defaults.get("country_indeed", "usa"),
             "verbose": 0,
         }
         if s.get("remote"):
             kwargs["is_remote"] = True
+        if s.get("job_type"):
+            kwargs["job_type"] = s["job_type"]
         if proxy_config:
             kwargs["proxies"] = [proxy_config["jobspy"]]
         if "linkedin" in other_sites:
@@ -246,6 +266,8 @@ def _run_one_search(
         }
         if s.get("remote"):
             gd_kwargs["is_remote"] = True
+        if s.get("job_type"):
+            gd_kwargs["job_type"] = s["job_type"]
         if proxy_config:
             gd_kwargs["proxies"] = [proxy_config["jobspy"]]
         try:
@@ -274,7 +296,16 @@ def _run_one_search(
         str(row.get("location", "")) if str(row.get("location", "")) != "nan" else None,
         accept_locs, reject_locs,
     ), axis=1)]
-    filtered = before - len(df)
+    location_filtered = before - len(df)
+
+    before_preferences = len(df)
+    df = df[df.apply(lambda row: config.job_matches_search_preferences(
+        str(row.get("title", "")) if str(row.get("title", "")) != "nan" else None,
+        str(row.get("description", "")) if str(row.get("description", "")) != "nan" else None,
+        search_cfg,
+    ), axis=1)]
+    preference_filtered = before_preferences - len(df)
+    filtered = location_filtered + preference_filtered
 
     conn = get_connection()
     new, existing = store_jobspy_results(conn, df, s["query"])
@@ -385,12 +416,20 @@ def _full_crawl(
 
     searches = []
     for q in queries:
-        for loc in locs:
+        query_location_labels = q.get("location_labels")
+        query_locs = (
+            [loc for loc in locs if loc.get("label") in query_location_labels]
+            if query_location_labels
+            else locs
+        )
+        for loc in query_locs:
             searches.append({
                 "query": q["query"],
                 "location": loc["location"],
                 "remote": loc.get("remote", False),
+                "job_type": loc.get("job_type"),
                 "tier": q.get("tier", 0),
+                "country_indeed": loc.get("country_indeed"),
             })
 
     proxy_config = parse_proxy(proxy) if proxy else None
@@ -409,7 +448,7 @@ def _full_crawl(
 
     for s in searches:
         result = _run_one_search(
-            s, sites, results_per_site, hours_old,
+            s, search_cfg, sites, results_per_site, hours_old,
             proxy_config, defaults, max_retries,
             accept_locs, reject_locs, glassdoor_map,
         )

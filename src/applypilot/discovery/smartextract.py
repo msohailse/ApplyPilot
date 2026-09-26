@@ -31,6 +31,7 @@ from playwright.sync_api import sync_playwright
 from applypilot import config
 from applypilot.config import CONFIG_DIR
 from applypilot.database import get_connection, init_db, store_jobs, get_stats
+from applypilot.enrichment.classify import classify_job, is_remote_only_violation
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,17 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         pass
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+# When set (e.g. "http://localhost:9334"), scraping connects to a logged-in
+# Chrome instance over CDP instead of launching a fresh headless browser. This
+# lets login-gated boards (Indeed, LinkedIn, Nettowork, ...) load.
+_PROFILE_CDP: str | None = None
+
+
+def set_profile_cdp(url: str | None) -> None:
+    """Point scraping at a logged-in Chrome CDP endpoint (or None to disable)."""
+    global _PROFILE_CDP
+    _PROFILE_CDP = url
 
 
 # -- Location filtering -------------------------------------------------------
@@ -67,6 +79,8 @@ def _location_ok(location: str | None, accept: list[str], reject: list[str]) -> 
     for r in reject:
         if r.lower() in loc:
             return False
+    if "*" in accept:
+        return True
     for a in accept:
         if a.lower() in loc:
             return True
@@ -92,6 +106,7 @@ def _store_jobs_filtered(
     strategy: str,
     accept_locs: list[str],
     reject_locs: list[str],
+    search_cfg: dict,
 ) -> tuple[int, int]:
     """Store jobs with location filtering. Returns (new, existing)."""
     now = datetime.now(timezone.utc).isoformat()
@@ -106,12 +121,32 @@ def _store_jobs_filtered(
         if not _location_ok(job.get("location"), accept_locs, reject_locs):
             filtered += 1
             continue
+        if not config.job_matches_search_preferences(
+            job.get("title"),
+            job.get("description"),
+            search_cfg,
+        ):
+            filtered += 1
+            continue
         try:
+            tags = classify_job(
+                title=job.get("title"), location=job.get("location"),
+                description=job.get("description"),
+            )
+            if is_remote_only_violation(
+                tags.get("country"), tags.get("work_mode"),
+                search_cfg.get("remote_only_countries", []),
+            ):
+                filtered += 1
+                continue
             conn.execute(
-                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at, "
+                "language_requirement, employment_type, country, work_mode, company) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (url, job.get("title"), job.get("salary"), job.get("description"),
-                 job.get("location"), site, strategy, now),
+                 job.get("location"), site, strategy, now,
+                 tags["language_requirement"], tags["employment_type"],
+                 tags["country"], tags["work_mode"], job.get("company") or None),
             )
             new += 1
         except sqlite3.IntegrityError:
@@ -162,8 +197,13 @@ def collect_page_intelligence(url: str, headless: bool = True) -> dict:
                 pass
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        page = browser.new_page(user_agent=UA)
+        if _PROFILE_CDP:
+            browser = p.chromium.connect_over_cdp(_PROFILE_CDP)
+            _ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+            page = _ctx.new_page()
+        else:
+            browser = p.chromium.launch(headless=headless)
+            page = browser.new_page(user_agent=UA)
         page.on("response", on_response)
 
         page.goto(url, timeout=60000)
@@ -282,6 +322,11 @@ def collect_page_intelligence(url: str, headless: bool = True) -> dict:
         # Capture full rendered HTML
         intel["full_html"] = page.content()
 
+        if _PROFILE_CDP:
+            try:
+                page.close()
+            except Exception:
+                pass
         browser.close()
 
     # Process API responses
@@ -364,7 +409,7 @@ def judge_api_responses(api_responses: list[dict]) -> list[dict]:
     if not api_responses:
         return []
 
-    client = get_client()
+    client = get_client("discover")
     relevant: list[dict] = []
 
     for resp in api_responses:
@@ -640,7 +685,7 @@ PAGE HTML:
 
 def ask_llm(prompt: str) -> tuple[str, float, dict]:
     """Send prompt to LLM. Returns (response_text, seconds_taken, metadata)."""
-    client = get_client()
+    client = get_client("discover")
     t0 = time.time()
     text = client.ask(prompt, temperature=0.0, max_tokens=4096)
     elapsed = time.time() - t0
@@ -1016,6 +1061,7 @@ def _run_all(
     targets: list[dict],
     accept_locs: list[str],
     reject_locs: list[str],
+    search_cfg: dict,
     workers: int = 1,
 ) -> dict:
     """Run smart extract on all targets.
@@ -1038,7 +1084,8 @@ def _run_all(
         if jobs:
             new, existing = _store_jobs_filtered(conn, jobs, target["name"],
                                                   r.get("strategy", "?"),
-                                                  accept_locs, reject_locs)
+                                                  accept_locs, reject_locs,
+                                                  search_cfg)
             total_new += new
             total_existing += existing
             log.info("DB: +%d new, %d already existed", new, existing)
@@ -1088,6 +1135,7 @@ def _run_all(
 def run_smart_extract(
     sites: list[dict] | None = None,
     workers: int = 1,
+    use_profile: bool | None = None,
 ) -> dict:
     """Main entry point for AI-powered smart extraction.
 
@@ -1097,6 +1145,8 @@ def run_smart_extract(
     Args:
         sites: Override the site list. If None, loads from YAML.
         workers: Number of parallel threads for site scraping. Default 1 (sequential).
+        use_profile: Reuse the logged-in Chrome profile (for login-gated boards).
+            Defaults to the `use_profile` key in searches.yaml.
 
     Returns:
         Dict with stats: total_new, total_existing, passed, total.
@@ -1110,9 +1160,25 @@ def run_smart_extract(
         log.warning("No scrape targets configured. Create config/sites.yaml and searches.yaml.")
         return {"total_new": 0, "total_existing": 0, "passed": 0, "total": 0}
 
+    if use_profile is None:
+        use_profile = bool(search_cfg.get("use_profile"))
+
     search_sites = sum(1 for s in (sites or load_sites()) if s.get("type") == "search")
     static_sites = sum(1 for s in (sites or load_sites()) if s.get("type") != "search")
-    log.info("Sites: %d searchable, %d static | Total targets: %d (workers=%d)",
-             search_sites, static_sites, len(targets), workers)
+    log.info("Sites: %d searchable, %d static | Total targets: %d (workers=%d, profile=%s)",
+             search_sites, static_sites, len(targets), workers, use_profile)
 
-    return _run_all(targets, accept_locs, reject_locs, workers=workers)
+    proc = None
+    if use_profile:
+        from applypilot.apply.chrome import launch_chrome, cleanup_worker
+        proc = launch_chrome(worker_id=0, port=9334, headless=False)
+        set_profile_cdp("http://localhost:9334")
+        workers = 1  # one shared browser context
+        log.info("Using logged-in Chrome profile (CDP :9334) for scraping")
+    try:
+        return _run_all(targets, accept_locs, reject_locs, search_cfg, workers=workers)
+    finally:
+        if proc is not None:
+            set_profile_cdp(None)
+            from applypilot.apply.chrome import cleanup_worker
+            cleanup_worker(0, proc)

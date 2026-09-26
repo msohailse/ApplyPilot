@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 
 from applypilot.config import RESUME_PATH, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.enrichment.classify import (
+    canonicalize_company, canonicalize_country, canonicalize_language,
+)
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
@@ -38,6 +41,9 @@ IMPORTANT FACTORS:
 RESPOND IN EXACTLY THIS FORMAT (no other text):
 SCORE: [1-10]
 KEYWORDS: [comma-separated ATS keywords from the job description that match or could match the candidate]
+COMPANY: [the hiring company's name, e.g. "Mastercard"; "Unknown" if it is not stated]
+COUNTRY: [country where this job is located, English name, e.g. "Norway"; use "Unknown" if remote/unspecified]
+LANGUAGE: [any non-English language the job requires (required/essential/fluent/asset), e.g. "French", or "Bilingual (EN/FR)"; use "None" if only English is needed]
 REASONING: [2-3 sentences explaining the score]"""
 
 
@@ -48,10 +54,13 @@ def _parse_score_response(response: str) -> dict:
         response: Raw LLM response text.
 
     Returns:
-        {"score": int, "keywords": str, "reasoning": str}
+        {"score": int, "keywords": str, "country": str, "language": str, "reasoning": str}
     """
     score = 0
     keywords = ""
+    country = ""
+    language = ""
+    company = ""
     reasoning = response
 
     for line in response.split("\n"):
@@ -64,10 +73,23 @@ def _parse_score_response(response: str) -> dict:
                 score = 0
         elif line.startswith("KEYWORDS:"):
             keywords = line.replace("KEYWORDS:", "").strip()
+        elif line.startswith("COMPANY:"):
+            company = line.replace("COMPANY:", "").strip()
+        elif line.startswith("COUNTRY:"):
+            country = line.replace("COUNTRY:", "").strip()
+        elif line.startswith("LANGUAGE:"):
+            language = line.replace("LANGUAGE:", "").strip()
         elif line.startswith("REASONING:"):
             reasoning = line.replace("REASONING:", "").strip()
 
-    return {"score": score, "keywords": keywords, "reasoning": reasoning}
+    return {
+        "score": score,
+        "keywords": keywords,
+        "country": country,
+        "language": language,
+        "company": company,
+        "reasoning": reasoning,
+    }
 
 
 def score_job(resume_text: str, job: dict) -> dict:
@@ -93,8 +115,8 @@ def score_job(resume_text: str, job: dict) -> dict:
     ]
 
     try:
-        client = get_client()
-        response = client.chat(messages, max_tokens=512, temperature=0.2)
+        client = get_client("score")
+        response = client.chat(messages, max_tokens=1024, temperature=0.2)
         return _parse_score_response(response)
     except Exception as e:
         log.error("LLM error scoring job '%s': %s", job.get("title", "?"), e)
@@ -155,9 +177,16 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     # Write scores to DB
     now = datetime.now(timezone.utc).isoformat()
     for r in results:
+        country = canonicalize_country(r.get("country"))
+        language = canonicalize_language(r.get("language"))
+        company = canonicalize_company(r.get("company"))
         conn.execute(
-            "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ? WHERE url = ?",
-            (r["score"], f"{r['keywords']}\n{r['reasoning']}", now, r["url"]),
+            "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, "
+            "country = COALESCE(?, country), "
+            "company = COALESCE(?, company), "
+            "language_requirement = COALESCE(?, language_requirement) WHERE url = ?",
+            (r["score"], f"{r['keywords']}\n{r['reasoning']}", now,
+             country, company, language, r["url"]),
         )
     conn.commit()
 

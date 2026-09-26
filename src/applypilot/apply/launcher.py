@@ -283,8 +283,8 @@ def reset_failed() -> int:
         UPDATE jobs SET apply_status = NULL, apply_error = NULL,
                        apply_attempts = 0, agent_id = NULL
         WHERE apply_status = 'failed'
-          OR (apply_status IS NOT NULL AND apply_status != 'applied'
-              AND apply_status != 'in_progress')
+          OR (apply_status IS NOT NULL AND apply_status NOT IN
+              ('applied', 'in_progress', 'not_available', 'not_interested'))
     """)
     conn.commit()
     return cursor.rowcount

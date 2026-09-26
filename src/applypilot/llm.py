@@ -92,6 +92,10 @@ class LLMClient:
         # True once we've confirmed the native Gemini API works for this model
         self._use_native_gemini: bool = False
         self._is_gemini: bool = base_url.startswith(_GEMINI_COMPAT_BASE)
+        # DeepSeek reasoning models (v4-pro etc.) emit reasoning tokens that
+        # count against max_tokens and can truncate structured output. Disable
+        # thinking for these extraction/scoring tasks.
+        self._is_deepseek: bool = "deepseek" in base_url.lower()
 
     # -- Native Gemini API --------------------------------------------------
 
@@ -163,6 +167,10 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        # Disable DeepSeek "thinking" so reasoning tokens don't consume the
+        # output budget (which truncates JSON/structured responses).
+        if self._is_deepseek:
+            payload["thinking"] = {"type": "disabled"}
 
         resp = self._client.post(
             f"{self.base_url}/chat/completions",
@@ -281,17 +289,49 @@ class _GeminiCompatForbidden(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Singleton
+# Client cache (per model, so stages can use different models)
 # ---------------------------------------------------------------------------
 
-_instance: LLMClient | None = None
+_clients: dict[str, LLMClient] = {}
+
+# Optional per-stage model overrides. If LLM_MODEL_<STAGE> is set it is used
+# for that stage; otherwise LLM_MODEL is the fallback.
+_STAGE_MODEL_ENV: dict[str, str] = {
+    "discover": "LLM_MODEL_DISCOVER",
+    "enrich": "LLM_MODEL_ENRICH",
+    "score": "LLM_MODEL_SCORE",
+    "classify": "LLM_MODEL_CLASSIFY",
+    "tailor": "LLM_MODEL_TAILOR",
+    "cover": "LLM_MODEL_COVER",
+}
 
 
-def get_client() -> LLMClient:
-    """Return (or create) the module-level LLMClient singleton."""
-    global _instance
-    if _instance is None:
-        base_url, model, api_key = _detect_provider()
-        log.info("LLM provider: %s  model: %s", base_url, model)
-        _instance = LLMClient(base_url, model, api_key)
-    return _instance
+def resolve_model(stage: str | None = None) -> str | None:
+    """Return a stage-specific model override from the environment, if any."""
+    if stage:
+        env_key = _STAGE_MODEL_ENV.get(stage)
+        if env_key:
+            override = os.environ.get(env_key, "").strip()
+            if override:
+                return override
+    return None
+
+
+def get_client(stage: str | None = None) -> LLMClient:
+    """Return a cached LLMClient, optionally using a stage-specific model.
+
+    Args:
+        stage: Pipeline stage ("discover", "enrich", "score", "classify",
+            "tailor", "cover"). If set and LLM_MODEL_<STAGE> is configured, the
+            corresponding model is used; otherwise LLM_MODEL.
+    """
+    base_url, default_model, api_key = _detect_provider()
+    model = resolve_model(stage) or default_model
+    cache_key = f"{base_url}|{model}"
+    client = _clients.get(cache_key)
+    if client is None:
+        log.info("LLM provider: %s  model: %s%s", base_url, model,
+                 f"  (stage={stage})" if stage else "")
+        client = LLMClient(base_url, model, api_key)
+        _clients[cache_key] = client
+    return client

@@ -108,9 +108,15 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 ## HARD RULES:
 - Do NOT invent work, companies, degrees, or certifications
 - Do NOT change real numbers ({metrics_str})
-- Preserved companies: {companies_str} -- names stay as-is
+- Preserved companies: {companies_str} -- EVERY one must appear as its own
+  experience entry with the name exactly as written, even if a role looks
+  less relevant to this job. This is non-negotiable and takes priority over
+  the 1-page limit: if space is tight, cut down to 1-2 short bullets for the
+  least-relevant preserved companies rather than omitting the entry. A
+  company entry with 1 bullet is correct; a missing company entry is not.
 - Preserved school: {school}
-- Must fit 1 page.
+- Must fit 1 page. Achieve this by trimming bullets on less-relevant
+  companies (see above), not by dropping any preserved company.
 
 ## OUTPUT: Return ONLY valid JSON. No markdown fences. No commentary. No "here is" preamble.
 
@@ -325,7 +331,7 @@ def judge_tailored_resume(
         )},
     ]
 
-    client = get_client()
+    client = get_client("tailor")
     response = client.chat(messages, max_tokens=512, temperature=0.1)
 
     passed = "VERDICT: PASS" in response.upper()
@@ -382,7 +388,7 @@ def tailor_resume(
     }
     avoid_notes: list[str] = []
     tailored = ""
-    client = get_client()
+    client = get_client("tailor")
     tailor_prompt_base = _build_tailor_prompt(profile)
 
     for attempt in range(max_retries + 1):
@@ -544,6 +550,20 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
         results.append(result)
         stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
 
+        # Persist immediately so progress survives an interruption.
+        if result.get("status") in ("approved", "approved_with_judge_warning"):
+            conn.execute(
+                "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
+                "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+                (result.get("path"), datetime.now(timezone.utc).isoformat(), result["url"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+                (result["url"],),
+            )
+        conn.commit()
+
         elapsed = time.time() - t0
         rate = completed / elapsed if elapsed > 0 else 0
         log.info(
@@ -554,23 +574,6 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             rate * 60,
             result["title"][:40],
         )
-
-    # Persist to DB: increment attempt counter for ALL, save path only for approved
-    now = datetime.now(timezone.utc).isoformat()
-    _success_statuses = {"approved", "approved_with_judge_warning"}
-    for r in results:
-        if r["status"] in _success_statuses:
-            conn.execute(
-                "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
-                "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
-            )
-        else:
-            conn.execute(
-                "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["url"],),
-            )
-    conn.commit()
 
     elapsed = time.time() - t0
     log.info(

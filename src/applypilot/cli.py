@@ -168,20 +168,26 @@ def apply(
 
     if mark_applied:
         from applypilot.apply.launcher import mark_job
+        from applypilot.view import generate_dashboard
         mark_job(mark_applied, "applied")
-        console.print(f"[green]Marked as applied:[/green] {mark_applied}")
+        generate_dashboard()
+        console.print(f"[green]Marked as applied and updated dashboard:[/green] {mark_applied}")
         return
 
     if mark_failed:
         from applypilot.apply.launcher import mark_job
+        from applypilot.view import generate_dashboard
         mark_job(mark_failed, "failed", reason=fail_reason)
-        console.print(f"[yellow]Marked as failed:[/yellow] {mark_failed} ({fail_reason or 'manual'})")
+        generate_dashboard()
+        console.print(f"[yellow]Marked as failed and updated dashboard:[/yellow] {mark_failed} ({fail_reason or 'manual'})")
         return
 
     if reset_failed:
         from applypilot.apply.launcher import reset_failed as do_reset
+        from applypilot.view import generate_dashboard
         count = do_reset()
-        console.print(f"[green]Reset {count} failed job(s) for retry.[/green]")
+        generate_dashboard()
+        console.print(f"[green]Reset {count} failed job(s) for retry and updated dashboard.[/green]")
         return
 
     # --- Full apply mode ---
@@ -323,13 +329,70 @@ def status() -> None:
 
 
 @app.command()
-def dashboard() -> None:
-    """Generate and open the HTML dashboard in your browser."""
+def dashboard(
+    port: int = typer.Option(8765, "--port", help="Port for the interactive dashboard."),
+    static: bool = typer.Option(False, "--static", help="Write a static HTML file instead of serving."),
+) -> None:
+    """Serve the interactive dashboard (mark jobs applied / failed / not available)."""
     _bootstrap()
 
-    from applypilot.view import open_dashboard
+    if static:
+        from applypilot.view import open_dashboard
+        open_dashboard()
+        return
 
-    open_dashboard()
+    from applypilot.view import serve_dashboard
+    serve_dashboard(port=port)
+
+
+@app.command()
+def classify(
+    limit: int = typer.Option(0, "--limit", "-l", help="Max jobs to classify (0 = all missing)."),
+    batch_size: int = typer.Option(20, "--batch-size", help="Jobs per LLM request."),
+) -> None:
+    """Use the LLM to fill country + language for jobs still missing them."""
+    _bootstrap()
+
+    from applypilot.config import check_tier
+    from applypilot.database import get_connection
+    from applypilot.enrichment.classify import (
+        backfill_classifications, classify_jobs_with_llm,
+    )
+    from applypilot.view import generate_dashboard
+
+    check_tier(2, "LLM classification")
+
+    conn = get_connection()
+    backfill_classifications(conn)
+
+    console.print("[cyan]Classifying jobs with the LLM (country + language)...[/cyan]")
+    updated = classify_jobs_with_llm(conn, limit=limit, batch_size=batch_size)
+    console.print(f"[green]Updated {updated} job(s).[/green]")
+
+    generate_dashboard()
+
+
+@app.command()
+def verify(
+    limit: int = typer.Option(0, "--limit", "-l", help="Max jobs to check (0 = all)."),
+    site: Optional[str] = typer.Option(None, "--site", help="Only check jobs from this site."),
+    headless: bool = typer.Option(False, "--headless", help="Hide the Chrome window (profile mode only)."),
+    profile: bool = typer.Option(True, "--profile/--no-profile", help="Reuse your logged-in Chrome profile."),
+) -> None:
+    """Re-check stored jobs and mark expired/closed postings."""
+    _bootstrap()
+
+    from applypilot.enrichment.detail import verify_jobs
+    from applypilot.view import generate_dashboard
+
+    console.print("[cyan]Verifying job URLs for expiry...[/cyan]")
+    stats = verify_jobs(limit=limit, site=site, use_profile=profile, headless=headless)
+    console.print(
+        f"[green]Checked {stats['checked']} · expired {stats['expired']} · "
+        f"ok {stats['ok']} · errors {stats['errors']}[/green]"
+    )
+
+    generate_dashboard()
 
 
 @app.command()

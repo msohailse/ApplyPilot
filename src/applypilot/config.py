@@ -113,6 +113,28 @@ def load_search_config() -> dict:
     return yaml.safe_load(SEARCH_CONFIG_PATH.read_text(encoding="utf-8"))
 
 
+def job_matches_search_preferences(
+    title: str | None,
+    description: str | None,
+    search_config: dict,
+) -> bool:
+    """Return whether a discovered job passes configured title and text exclusions.
+
+    Only explicit exclusion phrases are filtered. Listings without work
+    authorization details are retained so they can be reviewed manually.
+    """
+    title_lower = (title or "").lower()
+    text_lower = f"{title or ''}\n{description or ''}".lower()
+
+    if any(pattern.lower() in title_lower for pattern in search_config.get("exclude_titles", [])):
+        return False
+
+    return not any(
+        pattern.lower() in text_lower
+        for pattern in search_config.get("exclude_description_patterns", [])
+    )
+
+
 def load_sites_config() -> dict:
     """Load sites.yaml configuration (sites list, manual_ats, blocked, etc.)."""
     import yaml

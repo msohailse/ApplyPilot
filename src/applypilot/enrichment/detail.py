@@ -463,7 +463,7 @@ def extract_with_llm(page, url: str) -> dict:
     )
 
     try:
-        client = get_client()
+        client = get_client("enrich")
         t0 = time.time()
         raw = client.ask(prompt, temperature=0.0, max_tokens=4096)
         elapsed = time.time() - t0
@@ -527,6 +527,53 @@ SITE_DELAYS = {
 RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 PERMANENT_FAILURES = {404, 410, 451}
 
+# Phrases that mean a posting is closed/expired (multi-language, since job
+# boards serve localized pages, e.g. it.indeed.com).
+EXPIRED_SIGNALS = (
+    "job posting expired",
+    "this job has expired",
+    "job has expired",
+    "no longer accepting applications",
+    "no longer accepting",
+    "position has been filled",
+    "this position is no longer",
+    "this job is no longer",
+    "no longer available",
+    "applications are closed",
+    "job is closed",
+    "posting is closed",
+    "offre expirée",
+    "offre est expirée",
+    "annuncio scaduto",
+    "annuncio è scaduto",
+    "offerte abgelaufen",
+    "oferta caducada",
+    "vaga expirada",
+)
+
+
+def is_expired_text(text: str | None) -> bool:
+    """True if page text indicates the posting is closed/expired."""
+    if not text:
+        return False
+    t = text.lower()
+    return any(sig in t for sig in EXPIRED_SIGNALS)
+
+
+def _page_is_expired(page) -> bool:
+    """Best-effort expired check on a loaded Playwright page."""
+    text = ""
+    try:
+        text = page.inner_text("body")
+    except Exception:
+        pass
+    if not text:
+        try:
+            text = page.content()
+        except Exception:
+            return False
+    return is_expired_text(text)
+
 
 def scrape_detail_page(page, url: str) -> dict:
     """Full cascade for one detail page."""
@@ -556,6 +603,13 @@ def scrape_detail_page(page, url: str) -> dict:
             result["error"] = "timeout"
         else:
             result["error"] = err_str[:200]
+        result["elapsed"] = time.time() - t0
+        return result
+
+    # Closed/expired postings: never worth scoring or tailoring.
+    if _page_is_expired(page):
+        result["status"] = "expired"
+        result["error"] = "expired"
         result["elapsed"] = time.time() - t0
         return result
 
@@ -661,12 +715,30 @@ def scrape_site_batch(
                 log.info("  %s | %s | desc=%s chars | apply=%s | %.1fs%s",
                          status, tier_str, f"{desc_len:,}", apply_str, elapsed, err_str)
 
-                if status in ("ok", "partial"):
+                if status == "expired":
+                    stats["expired"] = stats.get("expired", 0) + 1
+                    conn.execute(
+                        "UPDATE jobs SET detail_error = 'expired', detail_scraped_at = ?, "
+                        "apply_status = 'expired' WHERE url = ?",
+                        (now, url),
+                    )
+                elif status in ("ok", "partial"):
                     stats[status] += 1
+                    desc = result.get("full_description")
+                    from applypilot.enrichment.classify import classify_job
+                    loc_row = conn.execute(
+                        "SELECT location FROM jobs WHERE url = ?", (url,)
+                    ).fetchone()
+                    location = loc_row[0] if loc_row else None
+                    tags = classify_job(title=title, location=location, full_description=desc)
                     conn.execute(
                         "UPDATE jobs SET full_description = ?, application_url = ?, "
-                        "detail_scraped_at = ?, detail_error = NULL WHERE url = ?",
-                        (result.get("full_description"), result.get("application_url"), now, url),
+                        "detail_scraped_at = ?, detail_error = NULL, "
+                        "language_requirement = ?, employment_type = ?, "
+                        "country = ?, work_mode = ? WHERE url = ?",
+                        (desc, result.get("application_url"), now,
+                         tags["language_requirement"], tags["employment_type"],
+                         tags["country"], tags["work_mode"], url),
                     )
                 else:
                     stats["error"] += 1
@@ -891,4 +963,109 @@ def run_enrichment(limit: int = 100, workers: int = 1) -> dict:
     # Run the detail scraper
     stats = _run_detail_scraper(conn, max_per_site=limit, workers=workers)
 
+    return stats
+
+
+# -- Expiry re-verification --------------------------------------------------
+
+def _check_job_rows(page, conn, rows, stats) -> None:
+    """Load each job URL and mark expired/closed ones."""
+    for i, (url, title, _jsite) in enumerate(rows):
+        try:
+            resp = page.goto(url, timeout=45000)
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+            expired = (
+                bool(resp and resp.status in PERMANENT_FAILURES)
+                or _page_is_expired(page)
+            )
+        except Exception as e:
+            stats["errors"] += 1
+            log.debug("verify error for %s: %s", url, e)
+            continue
+
+        stats["checked"] += 1
+        if expired:
+            stats["expired"] += 1
+            conn.execute(
+                "UPDATE jobs SET detail_error = 'expired', "
+                "apply_status = 'expired' WHERE url = ?",
+                (url,),
+            )
+            conn.commit()
+            log.info("[%d/%d] EXPIRED  %s", i + 1, len(rows), (title or url)[:55])
+        else:
+            stats["ok"] += 1
+
+
+def verify_jobs(limit: int = 0, site: str | None = None,
+                use_profile: bool = True, headless: bool = False) -> dict:
+    """Re-check stored job URLs and mark expired/closed postings.
+
+    By default this reuses your logged-in Chrome profile (the same worker
+    profile the apply flow uses) via CDP, so login-gated sites like Indeed,
+    LinkedIn and Nettowork actually load. Set use_profile=False for a plain
+    headless browser.
+
+    Args:
+        limit: Max jobs to check (0 = all).
+        site: Only check jobs from this site.
+        use_profile: Reuse the logged-in Chrome worker profile.
+        headless: Hide the Chrome window (profile mode only). Off by default
+            because login-gated boards often block headless browsers.
+
+    Returns:
+        Dict with checked/expired/ok/errors counts.
+    """
+    conn = init_db()
+
+    query = (
+        "SELECT url, title, site FROM jobs "
+        "WHERE COALESCE(apply_status, '') NOT IN ('applied', 'expired')"
+    )
+    params: list = []
+    if site:
+        query += " AND site = ?"
+        params.append(site)
+    query += " ORDER BY fit_score DESC NULLS LAST, discovered_at DESC"
+    if limit > 0:
+        query += " LIMIT ?"
+        params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
+    if not rows:
+        log.info("No jobs to verify.")
+        return {"checked": 0, "expired": 0, "ok": 0, "errors": 0}
+
+    stats = {"checked": 0, "expired": 0, "ok": 0, "errors": 0}
+    log.info("Verifying %d job URL(s) for expiry (profile=%s)...", len(rows), use_profile)
+
+    if use_profile:
+        from applypilot.apply.chrome import launch_chrome, cleanup_worker
+        port = 9333
+        proc = launch_chrome(worker_id=0, port=port, headless=headless)
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.connect_over_cdp(f"http://localhost:{port}")
+                context = browser.contexts[0] if browser.contexts else browser.new_context()
+                page = context.new_page()
+                _check_job_rows(page, conn, rows, stats)
+                try:
+                    page.close()
+                except Exception:
+                    pass
+                browser.close()
+        finally:
+            cleanup_worker(0, proc)
+    else:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(user_agent=UA)
+            _check_job_rows(page, conn, rows, stats)
+            browser.close()
+
+    log.info("Verify done: %d checked, %d expired, %d errors",
+             stats["checked"], stats["expired"], stats["errors"])
     return stats
