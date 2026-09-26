@@ -28,7 +28,7 @@ console = Console()
 
 
 def _render_study_html() -> str:
-    """Render the 'Roles to study' panel (jobs marked as learning targets)."""
+    """Render the 'Personal Note for Study' panel (jobs marked as learning targets)."""
     jobs = get_study_jobs()
     if not jobs:
         return ""
@@ -47,7 +47,7 @@ def _render_study_html() -> str:
             f'<div class="study-note">{note}</div>'
             f"</div>"
         )
-    return f'<div class="study-panel"><h3>Roles to study</h3>{items}</div>'
+    return f'<div class="study-panel"><h3>Personal Note for Study</h3>{items}</div>'
 
 
 def _render_answers_html() -> str:
@@ -440,7 +440,7 @@ def render_dashboard_html() -> str:
             <input class="note-input" placeholder="Add a note..." value="{job_note}" onchange="saveNote(this)">
           </div>
           <details class="study-details{study_marked}">
-            <summary class="study-summary">Role to be studied{(' ✓' if study_marked else '')}</summary>
+            <summary class="study-summary">Personal Note for Study{(' ✓' if study_marked else '')}</summary>
             <textarea class="study-input" placeholder="Why study this role? skills to learn, gaps, notes..." onchange="saveStudy(this)">{study_display}</textarea>
           </details>
           <div class="card-footer">{apply_html}</div>
@@ -528,7 +528,7 @@ def render_dashboard_html() -> str:
   .answer-add {{ display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.75rem; }}
   .answer-textarea {{ min-height: 90px; resize: vertical; font-family: inherit; }}
 
-  /* Roles to study */
+  /* Personal Note for Study */
   .study-panel {{ background: #1e293b; border-radius: 12px; padding: 1.25rem; margin-bottom: 2rem; border-left: 3px solid #f59e0b; }}
   .study-panel h3 {{ font-size: 1rem; margin-bottom: 0.75rem; color: #94a3b8; }}
   .study-item {{ padding: 0.4rem 0; border-bottom: 1px solid #334155; font-size: 0.9rem; }}
