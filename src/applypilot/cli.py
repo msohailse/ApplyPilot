@@ -379,18 +379,12 @@ def combine(
     job = dict(row)
     console.print(
         f"[cyan]Combining resume for[/cyan] {job.get('title') or 'job'} "
-        f"[dim]({job.get('site') or 'unknown'})[/dim]..."
+        f"[dim]({job.get('site') or 'unknown'})[/dim]... "
+        "[dim](tailoring on demand if needed)[/dim]"
     )
     try:
         result = combine_resume(job, extra=instructions or "")
-    except FileNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
-        console.print(
-            "[dim]Run [bold]applypilot run tailor[/bold] first to generate a "
-            "tailored resume for this job.[/dim]"
-        )
-        raise typer.Exit(1)
-    except ValueError as exc:
+    except Exception as exc:  # noqa: BLE001 - user-facing CLI: report and exit
         console.print(f"[red]Combine failed:[/red] {exc}")
         raise typer.Exit(1)
 

@@ -32,6 +32,13 @@ log = logging.getLogger(__name__)
 MAX_ATTEMPTS = 5  # max cross-run retries before giving up
 
 
+def _prefix_for(job: dict) -> str:
+    """Build the ``Company_Title`` filename prefix used for tailored outputs."""
+    safe_title = re.sub(r"[^\w\s-]", "", job.get("title") or "role")[:50].strip().replace(" ", "_")
+    safe_site = re.sub(r"[^\w\s-]", "", job.get("site") or "company")[:20].strip().replace(" ", "_")
+    return f"{safe_site}_{safe_title}"
+
+
 # ── Prompt Builders (profile-driven) ──────────────────────────────────────
 
 def _build_tailor_prompt(profile: dict) -> str:
@@ -459,6 +466,61 @@ def tailor_resume(
     return tailored, report
 
 
+# ── On-demand (single job) ───────────────────────────────────────────────
+
+def tailor_one_job(job: dict, validation_mode: str = "normal") -> dict:
+    """Tailor and persist a single job's resume, on demand.
+
+    Per-job equivalent of ``run_tailoring`` used by Combine Resume so a job can
+    be tailored the moment the user clicks, without running the batch stage.
+    Writes ``.txt`` / ``_JOB.txt`` / ``_REPORT.json`` and records the path.
+
+    Returns:
+        {"path": str, "status": str, "attempts": int, "report": dict}
+    """
+    profile = load_profile()
+    resume_text = RESUME_PATH.read_text(encoding="utf-8")
+
+    tailored, report = tailor_resume(resume_text, job, profile, validation_mode=validation_mode)
+
+    TAILORED_DIR.mkdir(parents=True, exist_ok=True)
+    prefix = _prefix_for(job)
+
+    txt_path = TAILORED_DIR / f"{prefix}.txt"
+    txt_path.write_text(tailored, encoding="utf-8")
+
+    job_path = TAILORED_DIR / f"{prefix}_JOB.txt"
+    job_path.write_text(
+        f"Title: {job.get('title', '')}\n"
+        f"Company: {job.get('site', '')}\n"
+        f"Location: {job.get('location', 'N/A')}\n"
+        f"Score: {job.get('fit_score', 'N/A')}\n"
+        f"URL: {job.get('url', '')}\n\n"
+        f"{job.get('full_description', '')}",
+        encoding="utf-8",
+    )
+
+    report_path = TAILORED_DIR / f"{prefix}_REPORT.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    # Always record the generated text so the dashboard can link it, even if the
+    # validator/judge flagged issues -- the user explicitly asked for this job.
+    conn = get_connection()
+    conn.execute(
+        "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
+        "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+        (str(txt_path), datetime.now(timezone.utc).isoformat(), job["url"]),
+    )
+    conn.commit()
+
+    return {
+        "path": str(txt_path),
+        "status": report["status"],
+        "attempts": report["attempts"],
+        "report": report,
+    }
+
+
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
 def run_tailoring(min_score: int = 7, limit: int = 20,
@@ -497,9 +559,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
                                              validation_mode=validation_mode)
 
             # Build safe filename prefix
-            safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "_")
-            safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
-            prefix = f"{safe_site}_{safe_title}"
+            prefix = _prefix_for(job)
 
             # Save tailored resume text
             txt_path = TAILORED_DIR / f"{prefix}.txt"

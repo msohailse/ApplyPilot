@@ -181,16 +181,18 @@ def combine_resume(job: dict, extra: str = "") -> dict:
         ApplyPilot's default pipeline instead.
 
     Raises:
-        FileNotFoundError: if the tailored resume text is missing.
         ValueError: if the LLM response is not a complete LaTeX document.
     """
     load_env()
 
     tailored_path = job.get("tailored_resume_path")
     if not tailored_path or not Path(tailored_path).exists():
-        raise FileNotFoundError(
-            "No tailored resume text for this job yet -- run the tailor stage first."
-        )
+        # On-demand tailoring: no batch `tailor` stage required. Generate this
+        # single job's tailored text now, then reuse it for the LaTeX combine.
+        from applypilot.scoring.tailor import tailor_one_job
+
+        log.info("No tailored resume for %r yet; tailoring on demand...", job.get("title"))
+        tailored_path = tailor_one_job(job, validation_mode="normal")["path"]
 
     base = get_base_resume_tex()
     if base is None:

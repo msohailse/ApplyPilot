@@ -397,18 +397,19 @@ def render_dashboard_html() -> str:
             if file_links else ""
         )
 
-        # Combine Resume: render this job's tailored content into the base LaTeX.
+        # Combine Resume: tailor this job on demand (only if it has no tailored
+        # text yet) and render the result into the base LaTeX resume.
         combine_html = ""
-        if resume_txt:
+        if j["full_description"]:
             combine_html += (
                 '<button class="mark-btn combine" onclick="combineResume(this)" '
-                'title="Render the tailored content into your LaTeX resume">Combine Resume</button>'
+                'title="Tailor this job (if needed) and render into your LaTeX resume">Combine Resume</button>'
             )
-            if combined_tex:
-                combine_html += (
-                    '<button class="mark-btn combine-del" onclick="deleteCombined(this)" '
-                    'title="Delete the combined .tex and .pdf">Delete Resume</button>'
-                )
+        if combined_tex:
+            combine_html += (
+                '<button class="mark-btn combine-del" onclick="deleteCombined(this)" '
+                'title="Delete the combined .tex and .pdf">Delete Resume</button>'
+            )
 
         job_sections += f"""
         <div class="job-card" data-score="{score}" data-url="{escape(j['url'] or '')}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}" data-apply-status="{escape(j['apply_status'] or '')}" data-language="{('none' if not j['language_requirement'] else (j['language_requirement'] or '').lower())}" data-employment-type="{(j['employment_type'] or '').lower()}" data-country="{(j['country'] or '').lower()}" data-work-mode="{(j['work_mode'] or '').lower()}" data-company="{(j['company'] or '').lower()}">

@@ -69,18 +69,34 @@ Runs stages 1-5: discovers jobs, scores them, tailors your resume, generates cov
 
 Each stage is independent. Run them all or pick what you need.
 
-### Run only what you need
+### Tight flow: search + score, then tailor per click
 
-`applypilot run` with **no stage names runs `all` six stages** — which includes cover letters. To run a subset, name the stages explicitly:
+Run **only discovery, enrichment, and scoring** — no resumes, no cover letters:
 
 ```bash
-applypilot run discover enrich score          # find + score, nothing generated
-applypilot run tailor --min-score 8           # tailored resume text only, no cover letters
-applypilot run score tailor --min-score 8     # (re)score + tailor
-applypilot run cover --min-score 8            # cover letters only, if/when you want them
+applypilot run discover enrich score
 ```
 
-**Skip cover letters entirely** by simply never passing `cover` (or `all`). After tailoring, open `applypilot dashboard` and use **Combine Resume** per job to produce your own LaTeX-styled PDF (see [Combine Resume](#combine-resume-latex-master)). The `pdf` stage is not required for resumes — the Tailor stage already renders a draft PDF.
+Then open the dashboard and click **Combine Resume** only on the jobs you care about:
+
+```bash
+applypilot dashboard
+```
+
+Each click tailors **that one job on demand** (only if it has no tailored text yet; otherwise the existing tailoring is reused) and renders it into your LaTeX master. No batch `tailor`, no `cover`, no `pdf` stage required. Same thing from the terminal:
+
+```bash
+applypilot combine <job-url>
+```
+
+Optional subsets, only if you want them:
+
+```bash
+applypilot run tailor --min-score 8      # batch-tailor every job >= 8 (skips cover)
+applypilot run cover  --min-score 8      # cover letters only
+```
+
+> `applypilot run` with **no stage names runs `all` six stages** (which includes cover letters) — always name the stages you want.
 
 ---
 
@@ -217,7 +233,7 @@ The master is only ever **read**. If it `\documentclass`-es a custom class (e.g.
 
 ### 2. Use it
 
-- **Dashboard:** run `applypilot dashboard`, then click **Combine Resume** on any job that already has a tailored resume. Optionally type guidance (e.g. *"emphasize Kubernetes"*) in the prompt. The card then shows **Resume PDF / Resume TEX** links, and a **Delete Resume** button removes the generated `.tex`/`.pdf`.
+- **Dashboard:** run `applypilot dashboard`, then click **Combine Resume** on any job. If that job has no tailored resume yet, ApplyPilot **tailors it on the spot (that one job only)** and renders it into your LaTeX master. Optionally type guidance (e.g. *"emphasize Kubernetes"*) in the prompt. The card then shows **Resume PDF / Resume TEX** links, and a **Delete Resume** button removes the generated `.tex`/`.pdf`.
 - **CLI:**
 
   ```bash
