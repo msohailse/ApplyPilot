@@ -158,6 +158,47 @@ applypilot apply --gen --url URL       # generate prompt file for manual debuggi
 
 ---
 
+## Combine Resume (LaTeX master)
+
+The **Tailor** stage produces a job-specific resume as text (`~/.applypilot/tailored_resumes/*.txt`). **Combine Resume** takes that already-paid-for tailoring and injects it into *your own* LaTeX resume, then compiles a fresh PDF — so every application keeps your visual style while still being tuned to the job. It never modifies your master file and never re-analyzes the job (no extra tokens).
+
+### 1. Provide a LaTeX master resume
+
+Point ApplyPilot at your master `.tex` in `~/.applypilot/.env`:
+
+```bash
+APPLYPILOT_BASE_RESUME_TEX=/absolute/path/to/resume.tex
+# Optional: directories to scan if the path above ever moves or vanishes.
+APPLYPILOT_RESUME_SEARCH_DIR=/absolute/path/to/resume-dir
+```
+
+Ways to make a resume discoverable (first match wins):
+
+1. `APPLYPILOT_BASE_RESUME_TEX` — the exact path to your master `.tex`.
+2. A copy inside `~/.applypilot/` named `resume_base.tex`, `resume.tex`, or `resume.latex`.
+3. Auto-discovery under `APPLYPILOT_RESUME_SEARCH_DIR` (default `~/ownwork/resume`) — any `resume*.tex` / `*.latex` that contains `\documentclass` … `\end{document}`.
+
+The master is only ever **read**. If it `\documentclass`-es a custom class (e.g. `res.cls`), keep that `.cls` next to it — it is resolved automatically at compile time.
+
+### 2. Use it
+
+- **Dashboard:** run `applypilot dashboard`, then click **Combine Resume** on any job that already has a tailored resume. Optionally type guidance (e.g. *"emphasize Kubernetes"*) in the prompt. The card then shows **Resume PDF / Resume TEX** links, and a **Delete Resume** button removes the generated `.tex`/`.pdf`.
+- **CLI:**
+
+  ```bash
+  applypilot combine <job-url>
+  applypilot combine <job-url> --instructions "emphasize Kubernetes"
+  ```
+
+### 3. Output & fallback
+
+- Writes a new `~/.applypilot/tailored_resumes/Company_Role.tex` plus a compiled `Company_Role.pdf`. PDF compilation needs a TeX engine (`pdflatex` from TeX Live / MacTeX). Your master file is untouched.
+- **No LaTeX master found?** Combine falls back to ApplyPilot's default pipeline and renders the tailored text to PDF via Playwright, so the action still succeeds.
+
+> Combine Resume uses the LLM (`LLM_MODEL_TAILOR`) and is strictly per-job — one click affects only that job.
+
+---
+
 ## CLI Reference
 
 ```
@@ -178,6 +219,7 @@ applypilot apply --headless             # Headless browser mode
 applypilot apply --url URL              # Apply to a specific job
 applypilot status                       # Pipeline statistics
 applypilot dashboard                    # Open HTML results dashboard
+applypilot combine URL                  # Render a job's tailored resume into your LaTeX master
 ```
 
 ---

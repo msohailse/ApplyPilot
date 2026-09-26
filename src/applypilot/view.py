@@ -19,7 +19,7 @@ from urllib.parse import quote, urlparse, parse_qs
 from rich.console import Console
 
 from applypilot.config import APP_DIR, DB_PATH, TAILORED_DIR, COVER_LETTER_DIR
-from applypilot.database import get_connection, get_study_jobs
+from applypilot.database import ensure_columns, get_connection, get_study_jobs
 from applypilot.enrichment.classify import backfill_classifications, backfill_company_from_site
 from applypilot.todos import load_todos
 from applypilot.answers import load_answers
@@ -124,6 +124,10 @@ def render_dashboard_html() -> str:
     """
     conn = get_connection()
 
+    # Forward-migrate any columns added after this DB was created (e.g. the
+    # Combine Resume fields) so the query below never fails on an older DB.
+    ensure_columns(conn)
+
     # Regex-only safety backfill (never calls the LLM). Country/language are
     # decided during the pipeline (discovery + scoring) and via `applypilot classify`.
     backfill_classifications(conn)
@@ -171,7 +175,7 @@ def render_dashboard_html() -> str:
                full_description, application_url, detail_error,
                fit_score, score_reasoning, apply_status,
                language_requirement, employment_type, country, work_mode,
-               tailored_resume_path, cover_letter_path, notes, apply_error, company, study_note
+               tailored_resume_path, combined_tex_path, cover_letter_path, notes, apply_error, company, study_note
         FROM jobs
         ORDER BY fit_score DESC NULLS LAST, site, title
     """).fetchall()
@@ -363,12 +367,17 @@ def render_dashboard_html() -> str:
         # Generated documents (tailored resume + cover letter) as clickable links.
         job_url_q = quote(j["url"] or "")
         resume_txt = j["tailored_resume_path"] or ""
+        combined_tex = j["combined_tex_path"] or ""
         cover_txt = j["cover_letter_path"] or ""
         file_links = []
         if resume_txt:
             if Path(resume_txt).with_suffix(".pdf").exists():
                 file_links.append(
                     f'<a class="file-link" href="/job-file?url={job_url_q}&kind=resume_pdf" target="_blank">Resume PDF</a>'
+                )
+            if combined_tex and Path(combined_tex).exists():
+                file_links.append(
+                    f'<a class="file-link" href="/job-file?url={job_url_q}&kind=resume_tex" target="_blank">Resume TEX</a>'
                 )
             if os.path.exists(resume_txt):
                 file_links.append(
@@ -387,6 +396,19 @@ def render_dashboard_html() -> str:
             f'<div class="files-row"><span class="files-label">Files:</span>{"".join(file_links)}</div>'
             if file_links else ""
         )
+
+        # Combine Resume: render this job's tailored content into the base LaTeX.
+        combine_html = ""
+        if resume_txt:
+            combine_html += (
+                '<button class="mark-btn combine" onclick="combineResume(this)" '
+                'title="Render the tailored content into your LaTeX resume">Combine Resume</button>'
+            )
+            if combined_tex:
+                combine_html += (
+                    '<button class="mark-btn combine-del" onclick="deleteCombined(this)" '
+                    'title="Delete the combined .tex and .pdf">Delete Resume</button>'
+                )
 
         job_sections += f"""
         <div class="job-card" data-score="{score}" data-url="{escape(j['url'] or '')}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}" data-apply-status="{escape(j['apply_status'] or '')}" data-language="{('none' if not j['language_requirement'] else (j['language_requirement'] or '').lower())}" data-employment-type="{(j['employment_type'] or '').lower()}" data-country="{(j['country'] or '').lower()}" data-work-mode="{(j['work_mode'] or '').lower()}" data-company="{(j['company'] or '').lower()}">
@@ -410,6 +432,7 @@ def render_dashboard_html() -> str:
             <button class="mark-btn fail" onclick="markJob(this,'failed')">Failed</button>
             <button class="mark-btn na" onclick="markJob(this,'not_available')">Not Available</button>
             <button class="mark-btn ni" onclick="markJob(this,'not_interested')">Not Interested</button>
+            {combine_html}
           </div>
           <div class="lang-flag">{lang_flag_html}</div>
           <div class="job-note">
@@ -642,6 +665,10 @@ def render_dashboard_html() -> str:
   .mark-btn.fail:hover {{ background: #ef4444; border-color: #ef4444; color: #0f172a; }}
   .mark-btn.na:hover {{ background: #94a3b8; border-color: #94a3b8; color: #0f172a; }}
   .mark-btn.reset {{ margin-left: auto; }}
+  .mark-btn.combine {{ background: #1e3a5f; border-color: #2a7ab5; color: #93c5fd; }}
+  .mark-btn.combine:hover {{ background: #2a7ab5; border-color: #2a7ab5; color: #fff; }}
+  .mark-btn.combine-del {{ background: #3f1d1d; border-color: #7f1d1d; color: #fca5a5; }}
+  .mark-btn.combine-del:hover {{ background: #b91c1c; border-color: #b91c1c; color: #fff; }}
   .lang-flag {{ margin: 0.5rem 0 0.1rem; }}
   .lang-flag-tag {{ font-size: 0.72rem; padding: 0.2rem 0.55rem; border-radius: 6px; font-weight: 600; display: inline-block; }}
   .lang-flag-tag.req {{ background: #7c2d12; color: #fdba74; }}
@@ -858,6 +885,58 @@ async function markJob(btn, status) {{
   await postMark(card, status, '');
   btn.disabled = false;
   btn.textContent = original;
+}}
+
+async function combineResume(btn) {{
+  const card = btn.closest('.job-card');
+  if (!card) return;
+  const url = card.dataset.url;
+  if (!url) return;
+  const extra = window.prompt('Optional instructions to guide the combine (blank = none):', '') || '';
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Combining...';
+  try {{
+    const data = await postJSON('/combine', {{url: url, extra: extra}});
+    if (data.ok) {{
+      if (data.fallback) alert('No LaTeX base found - used the default PDF pipeline.');
+      btn.textContent = 'Combined';
+      setTimeout(() => {{ location.reload(); }}, 600);
+    }} else {{
+      alert('Combine failed: ' + (data.error || 'unknown'));
+      btn.disabled = false;
+      btn.textContent = original;
+    }}
+  }} catch (e) {{
+    alert('Could not reach the dashboard server.\\nStart it with: applypilot dashboard');
+    btn.disabled = false;
+    btn.textContent = original;
+  }}
+}}
+
+async function deleteCombined(btn) {{
+  const card = btn.closest('.job-card');
+  if (!card) return;
+  const url = card.dataset.url;
+  if (!url) return;
+  if (!window.confirm('Delete the combined resume (.tex and .pdf) for this job?')) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Deleting...';
+  try {{
+    const data = await postJSON('/combine/delete', {{url: url}});
+    if (data.ok) {{
+      setTimeout(() => {{ location.reload(); }}, 300);
+    }} else {{
+      alert('Delete failed: ' + (data.error || 'unknown'));
+      btn.disabled = false;
+      btn.textContent = original;
+    }}
+  }} catch (e) {{
+    alert('Could not reach the dashboard server.\\nStart it with: applypilot dashboard');
+    btn.disabled = false;
+    btn.textContent = original;
+  }}
 }}
 
 let _reasonCard = null;
@@ -1220,13 +1299,14 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
             job_url = (params.get("url") or [""])[0]
             kind = (params.get("kind") or [""])[0]
             if not job_url or kind not in (
-                "resume_pdf", "resume_txt", "cover_pdf", "cover_txt",
+                "resume_pdf", "resume_txt", "resume_tex", "cover_pdf", "cover_txt",
             ):
                 self._send(400, b"Bad request", "text/plain")
                 return
             try:
                 row = get_connection().execute(
-                    "SELECT tailored_resume_path, cover_letter_path FROM jobs WHERE url = ?",
+                    "SELECT tailored_resume_path, cover_letter_path, combined_tex_path "
+                    "FROM jobs WHERE url = ?",
                     (job_url,),
                 ).fetchone()
             except Exception as exc:  # pragma: no cover - defensive
@@ -1235,7 +1315,12 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
             if not row:
                 self._send(404, b"Job not found", "text/plain")
                 return
-            base = row[0] if kind.startswith("resume") else row[1]
+            if kind == "resume_tex":
+                base = row[2]
+            elif kind.startswith("resume"):
+                base = row[0]
+            else:
+                base = row[1]
             if not base:
                 self._send(404, b"No file for this job", "text/plain")
                 return
@@ -1326,6 +1411,41 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                     return
                 set_job_study(url, data.get("note") or "")
                 self._json({"ok": True})
+            elif path == "/combine":
+                from applypilot.scoring.combine import combine_resume
+                url = data.get("url")
+                if not url:
+                    self._json({"ok": False, "error": "url required"})
+                    return
+                row = get_connection().execute(
+                    "SELECT url, title, site, company, location, full_description, "
+                    "tailored_resume_path FROM jobs WHERE url = ?",
+                    (url,),
+                ).fetchone()
+                if not row:
+                    self._json({"ok": False, "error": "job not found"})
+                    return
+                try:
+                    result = combine_resume(dict(row), extra=(data.get("extra") or ""))
+                except Exception as exc:  # pragma: no cover - defensive
+                    self._json({"ok": False, "error": str(exc)})
+                    return
+                self._json({"ok": True, **result})
+            elif path == "/combine/delete":
+                from applypilot.scoring.combine import delete_combined
+                url = data.get("url")
+                if not url:
+                    self._json({"ok": False, "error": "url required"})
+                    return
+                row = get_connection().execute(
+                    "SELECT url, combined_tex_path FROM jobs WHERE url = ?",
+                    (url,),
+                ).fetchone()
+                if not row:
+                    self._json({"ok": False, "error": "job not found"})
+                    return
+                removed = delete_combined(dict(row))
+                self._json({"ok": True, "removed": removed})
             elif path == "/answer/add":
                 from applypilot.answers import add_answer
                 q = (data.get("question") or "").strip()

@@ -177,6 +177,9 @@ _ALL_COLUMNS: dict[str, str] = {
     "tailored_resume_path": "TEXT",
     "tailored_at": "TEXT",
     "tailor_attempts": "INTEGER DEFAULT 0",
+    # Combined (LaTeX) resume rendered from the base template
+    "combined_tex_path": "TEXT",
+    "combined_at": "TEXT",
     # Cover letter
     "cover_letter_path": "TEXT",
     "cover_letter_at": "TEXT",

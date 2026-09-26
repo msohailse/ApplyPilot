@@ -91,6 +91,83 @@ def ensure_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
 
+def _resume_search_dirs() -> list[Path]:
+    """Directories to scan for a master LaTeX resume when none is configured."""
+    dirs: list[Path] = []
+
+    env_dir = os.environ.get("APPLYPILOT_RESUME_SEARCH_DIR", "").strip()
+    if env_dir:
+        dirs.append(Path(env_dir).expanduser())
+
+    # If a base path is configured (even if the file moved), scan around it.
+    configured = os.environ.get("APPLYPILOT_BASE_RESUME_TEX", "").strip()
+    if configured:
+        parent = Path(configured).expanduser().parent
+        dirs += [parent, parent.parent]
+
+    dirs.append(Path.home() / "ownwork" / "resume")
+
+    # De-duplicate and drop filesystem-root / non-existent dirs (never scan "/").
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for d in dirs:
+        if d in seen:
+            continue
+        seen.add(d)
+        if d.exists() and d != d.parent:
+            unique.append(d)
+    return unique
+
+
+def _looks_like_latex(path: Path) -> bool:
+    """True if the file is a complete LaTeX document (best-effort, cheap)."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return "\\documentclass" in text and "\\end{document}" in text
+
+
+def get_base_resume_tex() -> Path | None:
+    """Resolve the master LaTeX resume template used by "Combine Resume".
+
+    Resolution order (first existing wins):
+      1. APPLYPILOT_BASE_RESUME_TEX environment variable (set in ~/.applypilot/.env)
+      2. A cached copy stored in APP_DIR (resume_base.tex, then resume.tex/.latex)
+      3. Auto-discovery of a LaTeX resume under APPLYPILOT_RESUME_SEARCH_DIR
+         (default: ~/ownwork/resume)
+
+    The template is only ever read; it is never modified or overwritten.
+
+    Returns:
+        Path to the base .tex, or None if none is configured/found.
+    """
+    load_env()
+
+    candidates: list[Path] = []
+    env_path = os.environ.get("APPLYPILOT_BASE_RESUME_TEX", "").strip()
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+    candidates += [
+        APP_DIR / "resume_base.tex",
+        APP_DIR / "resume.tex",
+        APP_DIR / "resume.latex",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    # Best-effort discovery: prefer a resume-named document, then any .latex.
+    for root in _resume_search_dirs():
+        if not root.exists():
+            continue
+        for pattern in ("**/resume*.tex", "**/*.latex", "**/resume*.latex"):
+            for found in sorted(root.glob(pattern)):
+                if _looks_like_latex(found):
+                    return found
+    return None
+
+
 def load_profile() -> dict:
     """Load user profile from ~/.applypilot/profile.json."""
     import json
