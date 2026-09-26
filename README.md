@@ -69,6 +69,19 @@ Runs stages 1-5: discovers jobs, scores them, tailors your resume, generates cov
 
 Each stage is independent. Run them all or pick what you need.
 
+### Run only what you need
+
+`applypilot run` with **no stage names runs `all` six stages** — which includes cover letters. To run a subset, name the stages explicitly:
+
+```bash
+applypilot run discover enrich score          # find + score, nothing generated
+applypilot run tailor --min-score 8           # tailored resume text only, no cover letters
+applypilot run score tailor --min-score 8     # (re)score + tailor
+applypilot run cover --min-score 8            # cover letters only, if/when you want them
+```
+
+**Skip cover letters entirely** by simply never passing `cover` (or `all`). After tailoring, open `applypilot dashboard` and use **Combine Resume** per job to produce your own LaTeX-styled PDF (see [Combine Resume](#combine-resume-latex-master)). The `pdf` stage is not required for resumes — the Tailor stage already renders a draft PDF.
+
 ---
 
 ## ApplyPilot vs The Alternatives
@@ -117,7 +130,29 @@ Your personal data in one structured file: contact info, work authorization, com
 Job search queries, target titles, locations, boards. Run multiple searches with different parameters.
 
 ### `.env`
-API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `CAPSOLVER_API_KEY` (optional).
+API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `CAPSOLVER_API_KEY` (optional). Also where you register a LaTeX master for Combine Resume (below).
+
+### Resume files (where to put your resume)
+
+Everything lives in `~/.applypilot/`:
+
+| File | Purpose |
+|------|---------|
+| `resume.txt` | **Master resume as plain text** — the only resume the AI reads. Used by **Score**, **Tailor**, and **Cover Letter**. Created by `applypilot init`; replace it with your own text any time. |
+| `resume.pdf` | Optional master PDF, uploaded during auto-apply. |
+| your LaTeX master `.tex` | Used by **Combine Resume** to render a job's tailored content in your own template. Register it in `.env` (see [Combine Resume](#combine-resume-latex-master)). |
+
+Setup by path:
+
+1. **Plain text (required):** put your resume at `~/.applypilot/resume.txt` (and optionally `~/.applypilot/resume.pdf`).
+2. **LaTeX (optional, for Combine Resume):** add to `~/.applypilot/.env`:
+
+   ```bash
+   APPLYPILOT_BASE_RESUME_TEX=/absolute/path/to/resume.tex
+   APPLYPILOT_RESUME_SEARCH_DIR=/absolute/path/to/resume-dir   # optional fallback
+   ```
+
+   The `.tex` is only ever read; generated PDFs go to `~/.applypilot/tailored_resumes/`.
 
 ### Package configs (shipped with ApplyPilot)
 - `config/employers.yaml` - Workday employer registry (48 preconfigured)
