@@ -227,8 +227,32 @@ def _extract_body(payload: dict) -> str:
     return walk(payload or {})
 
 
+def _msg_to_dict(msg: dict) -> dict:
+    """Normalise a Gmail message (headers + body + sent/received)."""
+    headers = {
+        h.get("name", "").lower(): h.get("value", "")
+        for h in (msg.get("payload", {}).get("headers") or [])
+    }
+    labels = msg.get("labelIds", []) or []
+    return {
+        "id": msg.get("id", ""),
+        "thread_id": msg.get("threadId", ""),
+        "from": headers.get("from", ""),
+        "to": headers.get("to", ""),
+        "subject": headers.get("subject", ""),
+        "date": headers.get("date", ""),
+        "snippet": msg.get("snippet", ""),
+        "body": _extract_body(msg.get("payload", {}))[:4000],
+        "direction": "sent" if "SENT" in labels else "received",
+    }
+
+
 def fetch_company_messages(job: dict, max_results: int = 8) -> list[dict]:
-    """Fetch up to ``max_results`` messages matching this job's company/role."""
+    """Fetch the full conversation(s) for this job's company/role.
+
+    Finds matching messages, then expands each thread so the whole exchange is
+    included -- both what the employer sent and what the candidate sent.
+    """
     service = _service()
     label = get_gmail_config().get("label", "")
     query = _build_query(job, label)
@@ -238,25 +262,43 @@ def fetch_company_messages(job: dict, max_results: int = 8) -> list[dict]:
         userId="me", q=query, maxResults=max_results
     ).execute()
 
-    messages: list[dict] = []
+    thread_ids: list[str] = []
     for meta in listing.get("messages", []) or []:
-        msg = service.users().messages().get(
-            userId="me", id=meta["id"], format="full"
-        ).execute()
-        headers = {
-            h.get("name", "").lower(): h.get("value", "")
-            for h in (msg.get("payload", {}).get("headers") or [])
-        }
-        messages.append({
-            "id": meta["id"],
-            "thread_id": msg.get("threadId", ""),
-            "from": headers.get("from", ""),
-            "subject": headers.get("subject", ""),
-            "date": headers.get("date", ""),
-            "snippet": msg.get("snippet", ""),
-            "body": _extract_body(msg.get("payload", {}))[:4000],
-        })
-    return messages
+        tid = meta.get("threadId")
+        if tid and tid not in thread_ids:
+            thread_ids.append(tid)
+
+    messages: list[dict] = []
+    seen: set[str] = set()
+    for tid in thread_ids[:6]:
+        try:
+            thread = service.users().threads().get(
+                userId="me", id=tid, format="full"
+            ).execute()
+        except Exception:  # noqa: BLE001 - skip unreadable thread
+            continue
+        for msg in thread.get("messages", []) or []:
+            mid = msg.get("id", "")
+            if mid and mid not in seen:
+                seen.add(mid)
+                messages.append(_msg_to_dict(msg))
+    return messages[:20]
+
+
+def _thread_text(messages: list[dict]) -> str:
+    """Render the conversation as a readable, cached transcript."""
+    parts = []
+    for m in messages:
+        who = (
+            "You (candidate)"
+            if m.get("direction") == "sent"
+            else (m.get("from") or "Them")
+        )
+        parts.append(
+            f"[{m.get('date')}] {who}\nSubject: {m.get('subject')}\n"
+            f"{m.get('body') or m.get('snippet')}"
+        )
+    return "\n\n---\n\n".join(parts)[:12000]
 
 
 # ── LLM action-item extraction ───────────────────────────────────────────
@@ -279,10 +321,7 @@ def summarize_thread(job: dict, messages: list[dict]) -> str:
     """Ask the LLM for the status + action items from the fetched messages."""
     if not messages:
         return "No matching emails found for this company."
-    thread_text = "\n\n".join(
-        f"[{m['date']}] From: {m['from']}\nSubject: {m['subject']}\n{m['body'] or m['snippet']}"
-        for m in messages
-    )[:12000]
+    thread_text = _thread_text(messages)
     job_text = (
         f"TITLE: {job.get('title')}\n"
         f"COMPANY: {job.get('company') or job.get('site')}\n"
@@ -360,7 +399,8 @@ def scan_and_cache(job: dict, max_results: int = 8) -> dict:
         category = "none"
     message_ids = ",".join(m["id"] for m in messages)
     save_inbox_cache(
-        job["url"], message_ids, "", summary, resolve_model("inbox") or "", category,
+        job["url"], message_ids, _thread_text(messages), summary,
+        resolve_model("inbox") or "", category,
     )
 
     # Auto-assign the application status from the email theme.

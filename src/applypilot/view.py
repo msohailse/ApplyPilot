@@ -382,11 +382,21 @@ def _render_inbox_tab_html() -> str:
         summary_html = (
             f'<pre class="inbox-body">{escape(summary)}</pre>' if summary else ""
         )
+        thread = cache.get("thread_text") or ""
+        n_msgs = len([x for x in (cache.get("message_ids") or "").split(",") if x])
+        thread_html = ""
+        if thread:
+            suffix = f" ({n_msgs} messages)" if n_msgs else ""
+            thread_html = (
+                f'<details class="inbox-thread">'
+                f'<summary>Show thread{suffix}</summary>'
+                f'<pre class="inbox-body">{escape(thread)}</pre></details>'
+            )
         groups[cat].append(
             f'<div class="inbox-item">'
             f'<a href="{url}" target="_blank" rel="noopener">{title}</a>'
             f' <span class="study-co">{comp}</span>'
-            f'{summary_html}</div>'
+            f'{summary_html}{thread_html}</div>'
         )
 
     cards = ""
@@ -1309,6 +1319,11 @@ def render_dashboard_html() -> str:
   .inbox-item:first-child {{ border-top: none; }}
   .inbox-item a {{ color: #93c5fd; text-decoration: none; font-weight: 600; }}
   .inbox-item a:hover {{ text-decoration: underline; }}
+  .inbox-thread {{ margin-top: 0.4rem; }}
+  .inbox-thread > summary {{ cursor: pointer; font-size: 0.78rem; color: #94a3b8; }}
+  .inbox-thread > summary:hover {{ color: #93c5fd; }}
+  .inbox-thread .inbox-body {{ margin-top: 0.4rem; max-height: 340px; overflow: auto;
+    background: #0b1220; border: 1px solid #1e293b; border-radius: 6px; padding: 0.6rem; }}
   .focus-filter-btn.active {{ background: #f59e0b; border-color: #f59e0b; color: #0f172a; font-weight: bold; }}
 
   /* Post-application outcome buttons (hidden until the job is applied) */
