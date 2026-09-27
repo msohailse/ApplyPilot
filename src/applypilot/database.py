@@ -705,3 +705,11 @@ def delete_inbox_cache(url: str) -> None:
     conn = get_connection()
     conn.execute("DELETE FROM inbox_cache WHERE url = ?", (url,))
     conn.commit()
+
+
+def clear_inbox_cache() -> int:
+    """Wipe the entire inbox index so the next scan refetches. Returns rows removed."""
+    conn = get_connection()
+    cur = conn.execute("DELETE FROM inbox_cache")
+    conn.commit()
+    return cur.rowcount

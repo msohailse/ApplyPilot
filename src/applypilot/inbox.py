@@ -172,6 +172,20 @@ def _title_terms(title: str) -> list[str]:
     return out[:4]
 
 
+def _title_phrase(title: str) -> str:
+    """A cleaned, quotable version of the title for Gmail phrase search."""
+    import unicodedata
+
+    s = "".join(
+        c
+        for c in unicodedata.normalize("NFKD", title or "")
+        if not unicodedata.combining(c)
+    )
+    s = re.sub(r"[^\w\s+#]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s if len(s) >= 3 else ""
+
+
 def _build_query(job: dict, label: str) -> str:
     """Compose a Gmail search query for this job's company/role."""
     name = (job.get("company") or "").strip()
@@ -180,8 +194,9 @@ def _build_query(job: dict, label: str) -> str:
         "(applied OR application OR interview OR recruiter OR assessment OR "
         "offer OR schedule OR scheduling OR \"next steps\" OR position OR candidacy)"
     )
-    # Never surface marketing / social noise (e.g. bank promos match "application").
-    noise = "-category:promotions -category:social -category:forums -in:chats"
+    # Drop marketing/forum noise (bank promos match "application"), but KEEP
+    # category:social -- LinkedIn/Indeed application confirmations live there.
+    noise = "-category:promotions -category:forums -in:chats"
     parts = []
     if label:
         parts.append(f'label:"{label}"')
@@ -199,8 +214,12 @@ def _build_query(job: dict, label: str) -> str:
         terms = _title_terms(job.get("title") or "")
         if terms:
             parts.append("(" + " OR ".join(terms) + ")")
-        elif name:
-            parts.append(f'"{name}"')
+        else:
+            phrase = _title_phrase(job.get("title") or "")
+            if phrase:
+                parts.append(f'"{phrase}"')
+            elif name:
+                parts.append(f'"{name}"')
     parts.append(keywords)
     parts.append(noise)
     return " ".join(parts)
@@ -230,6 +249,47 @@ def _extract_body(payload: dict) -> str:
     return walk(payload or {})
 
 
+def _extract_html(payload: dict) -> str:
+    def walk(part: dict) -> str:
+        mime = part.get("mimeType", "")
+        data = (part.get("body") or {}).get("data")
+        if data and mime == "text/html":
+            return _decode(data)
+        for child in part.get("parts") or []:
+            html = walk(child)
+            if html:
+                return html
+        return ""
+
+    return walk(payload or {})
+
+
+# Links that are never useful in a job thread (tracking / social boilerplate).
+_LINK_NOISE = (
+    "unsubscribe", "twitter.com", "x.com/", "facebook.com", "instagram.com",
+    "linkedin.com/comm", "google.com/maps", "googleusercontent", "list-manage",
+    "sendgrid", "mailchimp", "pixel", "click.pstmrk", "/track",
+)
+
+
+def _extract_links(payload: dict) -> list[str]:
+    """Pull real URLs out of an email (HTML hrefs first, then plain text)."""
+    links: list[str] = []
+    for u in re.findall(r'href="(https?://[^"]+)"', _extract_html(payload) or ""):
+        links.append(u)
+    for u in re.findall(r"https?://[^\s<>\"')]+", _extract_body(payload) or ""):
+        links.append(u)
+    out: list[str] = []
+    for u in links:
+        u = u.rstrip(").,;:'\"")
+        low = u.lower()
+        if any(n in low for n in _LINK_NOISE):
+            continue
+        if u not in out:
+            out.append(u)
+    return out[:6]
+
+
 def _msg_to_dict(msg: dict) -> dict:
     """Normalise a Gmail message (headers + body + sent/received)."""
     headers = {
@@ -246,6 +306,7 @@ def _msg_to_dict(msg: dict) -> dict:
         "date": headers.get("date", ""),
         "snippet": msg.get("snippet", ""),
         "body": _extract_body(msg.get("payload", {}))[:4000],
+        "links": _extract_links(msg.get("payload", {})),
         "direction": "sent" if "SENT" in labels else "received",
     }
 
@@ -297,10 +358,13 @@ def _thread_text(messages: list[dict]) -> str:
             if m.get("direction") == "sent"
             else (m.get("from") or "Them")
         )
-        parts.append(
+        block = (
             f"[{m.get('date')}] {who}\nSubject: {m.get('subject')}\n"
             f"{m.get('body') or m.get('snippet')}"
         )
+        if m.get("links"):
+            block += "\nLinks:\n" + "\n".join(m["links"])
+        parts.append(block)
     return "\n\n---\n\n".join(parts)[:12000]
 
 
@@ -317,7 +381,8 @@ Output a short plain-text brief using ONLY these labels (omit empty ones):
 STATUS: one line (applied, screening, interview scheduled, assessment, rejection, offer, waiting)
 NEXT STEP: the single next action for the candidate, including any date/time/deadline
 ACTION ITEMS: short bullets of what the employer or candidate must do
-KEY DETAILS: names, interview format/platform, documents requested, links, salary if stated
+KEY DETAILS: names, interview format/platform, documents requested, salary if stated
+LINK: any URL from the emails that the candidate should act on (application/status page, scheduling link, document to upload). Copy the full URL exactly. Omit if none.
 SUGGESTION: one concrete, truthful suggestion for the candidate's next move
 
 The CANDIDATE owns this mailbox. Keep it tight and factual."""

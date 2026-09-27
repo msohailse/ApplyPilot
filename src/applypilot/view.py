@@ -11,6 +11,7 @@ Generates a self-contained HTML dashboard with:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import webbrowser
 from html import escape
@@ -347,7 +348,7 @@ def _job_inbox_html(job: dict, inbox_cached: str | None) -> str:
             '<button class="mark-btn inbox-scan" onclick="scanInbox(this)">Refresh</button>'
             '<button class="mark-btn combine-del" onclick="freeInbox(this)">Free</button>'
             '</div>'
-            f'<pre class="inbox-body">{escape(inbox_cached)}</pre>'
+            f'<div class="inbox-summary">{_linkify(inbox_cached)}</div>'
             '</div>'
         )
     return (
@@ -355,6 +356,44 @@ def _job_inbox_html(job: dict, inbox_cached: str | None) -> str:
         '<button class="mark-btn inbox-scan" onclick="scanInbox(this)">Inbox Insights</button>'
         '</div>'
     )
+
+
+_URL_RE = re.compile(r"(https?://[^\s<>\"')]+)")
+
+
+def _linkify(text: str) -> str:
+    """Escape text but turn bare URLs into clickable links."""
+    text = text or ""
+    out = []
+    last = 0
+    for m in _URL_RE.finditer(text):
+        out.append(escape(text[last:m.start()]))
+        url = m.group(1)
+        out.append(
+            f'<a href="{escape(url)}" target="_blank" rel="noopener">{escape(url)}</a>'
+        )
+        last = m.end()
+    out.append(escape(text[last:]))
+    return "".join(out)
+
+
+def _render_thread_html(thread_text: str) -> str:
+    """Render a cached email transcript as readable message cards."""
+    blocks = [b for b in (thread_text or "").split("\n\n---\n\n") if b.strip()]
+    if not blocks:
+        return f'<pre class="inbox-body">{escape(thread_text or "")}</pre>'
+    out = []
+    for b in blocks:
+        lines = b.split("\n")
+        head = lines[0] if lines else ""
+        rest = "\n".join(lines[1:]).strip()
+        sent = "You (candidate)" in head
+        out.append(
+            f'<div class="inbox-msg{" sent" if sent else ""}">'
+            f'<div class="inbox-msg-head">{escape(head)}</div>'
+            f'<div class="inbox-msg-body">{_linkify(rest)}</div></div>'
+        )
+    return "".join(out)
 
 
 def _render_inbox_tab_html() -> str:
@@ -380,7 +419,7 @@ def _render_inbox_tab_html() -> str:
         url = escape(j["url"] or "")
         summary = cache.get("summary") or ""
         summary_html = (
-            f'<pre class="inbox-body">{escape(summary)}</pre>' if summary else ""
+            f'<div class="inbox-summary">{_linkify(summary)}</div>' if summary else ""
         )
         thread = cache.get("thread_text") or ""
         n_msgs = len([x for x in (cache.get("message_ids") or "").split(",") if x])
@@ -390,7 +429,7 @@ def _render_inbox_tab_html() -> str:
             thread_html = (
                 f'<details class="inbox-thread">'
                 f'<summary>Show thread{suffix}</summary>'
-                f'<pre class="inbox-body">{escape(thread)}</pre></details>'
+                f'{_render_thread_html(thread)}</details>'
             )
         groups[cat].append(
             f'<div class="inbox-item">'
@@ -406,7 +445,7 @@ def _render_inbox_tab_html() -> str:
             continue
         label = CATEGORY_META[key][0]
         cards += (
-            f'<details class="inbox-group" open>'
+            f'<details class="inbox-group cat-{key}" open>'
             f'<summary>{escape(label)} <span class="inbox-count">{len(items)}</span></summary>'
             f'<div class="inbox-group-body">{"".join(items)}</div>'
             f"</details>"
@@ -417,7 +456,10 @@ def _render_inbox_tab_html() -> str:
     return f"""
 <div class="inbox-tab-head">
   <h2>Inbox insights</h2>
-  <button class="mark-btn inbox-scan" onclick="scanAppliedInbox(this)">Scan applied jobs</button>
+  <div class="inbox-tab-actions">
+    <button class="mark-btn inbox-scan" onclick="scanAppliedInbox(this)">Scan applied jobs</button>
+    <button class="mark-btn combine-del" onclick="clearInboxIndex(this)">Clear index</button>
+  </div>
 </div>
 <p class="subtitle">Applications grouped by what your inbox says: offers, interviews,
 assessments, screening, waiting, rejections.</p>
@@ -1309,21 +1351,43 @@ def render_dashboard_html() -> str:
   .inbox-body {{ white-space: pre-wrap; font-family: inherit; font-size: 0.8rem; color: #cbd5e1; margin: 0; }}
   .mark-btn.inbox-scan {{ background: #1e3a5f; border-color: #2a7ab5; color: #93c5fd; }}
   .mark-btn.inbox-scan:hover {{ background: #2a7ab5; border-color: #2a7ab5; color: #fff; }}
-  .inbox-tab-head {{ display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.4rem; }}
-  .inbox-tab-head h2 {{ font-size: 1.3rem; }}
-  .inbox-group {{ background: #0f172a; border: 1px solid #1e293b; border-radius: 10px; margin-bottom: 0.75rem; padding: 0.6rem 1rem; }}
-  .inbox-group > summary {{ cursor: pointer; font-weight: 700; color: #93c5fd; font-size: 1rem; }}
-  .inbox-count {{ background: #1e293b; color: #cbd5e1; font-size: 0.75rem; padding: 0.05rem 0.5rem; border-radius: 999px; margin-left: 0.4rem; }}
-  .inbox-group-body {{ margin-top: 0.6rem; }}
-  .inbox-item {{ padding: 0.5rem 0; border-top: 1px solid #1e293b; }}
+  .inbox-tab-head {{ display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem; margin-bottom: 0.2rem; flex-wrap: wrap; }}
+  .inbox-tab-head h2 {{ font-size: 1.35rem; }}
+  .inbox-tab-actions {{ display: flex; gap: 0.5rem; }}
+  .inbox-group {{ background: #0f172a; border: 1px solid #1e293b; border-radius: 10px;
+    margin-bottom: 0.75rem; padding: 0.55rem 1rem; }}
+  .inbox-group > summary {{ cursor: pointer; font-weight: 700; color: #93c5fd;
+    font-size: 1rem; list-style: none; }}
+  .inbox-group > summary::-webkit-details-marker {{ display: none; }}
+  .inbox-group > summary::before {{ content: "▸"; color: #64748b; margin-right: 0.4rem; }}
+  .inbox-group[open] > summary::before {{ content: "▾"; }}
+  .inbox-group.cat-offer > summary {{ color: #34d399; }}
+  .inbox-group.cat-interview > summary {{ color: #60a5fa; }}
+  .inbox-group.cat-assessment > summary {{ color: #fbbf24; }}
+  .inbox-group.cat-screening > summary {{ color: #c4b5fd; }}
+  .inbox-group.cat-rejected > summary {{ color: #f87171; }}
+  .inbox-group.cat-waiting > summary {{ color: #93c5fd; }}
+  .inbox-group.cat-none > summary {{ color: #64748b; }}
+  .inbox-count {{ background: #1e293b; color: #cbd5e1; font-size: 0.72rem;
+    padding: 0.05rem 0.5rem; border-radius: 999px; margin-left: 0.4rem; }}
+  .inbox-group-body {{ margin-top: 0.5rem; }}
+  .inbox-item {{ padding: 0.6rem 0 0.75rem; border-top: 1px solid #1e293b; }}
   .inbox-item:first-child {{ border-top: none; }}
-  .inbox-item a {{ color: #93c5fd; text-decoration: none; font-weight: 600; }}
-  .inbox-item a:hover {{ text-decoration: underline; }}
-  .inbox-thread {{ margin-top: 0.4rem; }}
+  .inbox-item > a {{ color: #93c5fd; text-decoration: none; font-weight: 600; }}
+  .inbox-item > a:hover {{ text-decoration: underline; }}
+  .inbox-summary {{ font-size: 0.82rem; color: #cbd5e1; white-space: pre-wrap;
+    margin-top: 0.35rem; line-height: 1.5; }}
+  .inbox-summary a, .inbox-msg-body a {{ color: #60a5fa; word-break: break-all; }}
+  .inbox-thread {{ margin-top: 0.45rem; }}
   .inbox-thread > summary {{ cursor: pointer; font-size: 0.78rem; color: #94a3b8; }}
   .inbox-thread > summary:hover {{ color: #93c5fd; }}
-  .inbox-thread .inbox-body {{ margin-top: 0.4rem; max-height: 340px; overflow: auto;
-    background: #0b1220; border: 1px solid #1e293b; border-radius: 6px; padding: 0.6rem; }}
+  .inbox-msg {{ border-left: 3px solid #334155; background: #0b1220; border-radius: 6px;
+    padding: 0.5rem 0.7rem; margin: 0.45rem 0 0; max-height: 300px; overflow: auto; }}
+  .inbox-msg.sent {{ border-left-color: #10b981; }}
+  .inbox-msg-head {{ font-size: 0.72rem; color: #94a3b8; margin-bottom: 0.3rem; }}
+  .inbox-msg-body {{ font-size: 0.82rem; color: #cbd5e1; white-space: pre-wrap;
+    line-height: 1.5; }}
   .focus-filter-btn.active {{ background: #f59e0b; border-color: #f59e0b; color: #0f172a; font-weight: bold; }}
 
   /* Post-application outcome buttons (hidden until the job is applied) */
@@ -2326,6 +2390,26 @@ async function refreshInboxTab() {{
     const d = await res.json();
     if (d.ok) document.getElementById('tab-inbox').innerHTML = d.html;
   }} catch (e) {{}}
+}}
+
+async function clearInboxIndex(btn) {{
+  if (!window.confirm('Clear the cached inbox index for all jobs? The next scan will refetch from Gmail.')) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Clearing...';
+  try {{
+    const d = await postJSON('/inbox/clear-all', {{}});
+    if (d.ok) {{
+      await refreshInboxTab();
+    }} else {{
+      alert('Failed: ' + (d.error || 'unknown'));
+    }}
+  }} catch (e) {{
+    alert('Could not reach the dashboard server.');
+  }} finally {{
+    btn.disabled = false;
+    btn.textContent = original;
+  }}
 }}
 
 function quickStatus(val) {{
@@ -3402,6 +3486,9 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                     self._json({"ok": False, "error": str(exc)})
                     return
                 self._json({"ok": True, **result})
+            elif path == "/inbox/clear-all":
+                from applypilot.database import clear_inbox_cache
+                self._json({"ok": True, "cleared": clear_inbox_cache()})
             elif path == "/inbox/free":
                 from applypilot.inbox import free as free_inbox
                 url = data.get("url")
