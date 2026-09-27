@@ -32,6 +32,7 @@ from applypilot.database import (
 )
 from applypilot.enrichment.classify import backfill_classifications, backfill_company_from_site
 from applypilot.links import load_links
+from applypilot.roles import load_roles
 from applypilot.todos import load_todos
 from applypilot.answers import load_answers
 
@@ -58,7 +59,10 @@ def _render_study_html() -> str:
             f'<div class="study-note">{note}</div>'
             f"</div>"
         )
-    return f'<div class="study-panel"><h3>Personal Note for Study</h3>{items}</div>'
+    return (
+        f'<details class="study-panel" open>'
+        f'<summary>Personal Note for Study</summary>{items}</details>'
+    )
 
 
 def _render_answers_html() -> str:
@@ -199,6 +203,70 @@ def _render_links_html() -> str:
     <button class="todo-add-btn" onclick="addLink()">Add</button>
   </div>
   <datalist id="link-tag-list">{tag_datalist}</datalist>
+</details>"""
+
+
+def _render_roles_html() -> str:
+    """Render the roles panel (reference roles with LLM-extracted skills)."""
+    roles = load_roles()
+
+    tags: list[str] = []
+    for r in roles:
+        tag = (r.get("tag") or "").strip()
+        if tag and tag not in tags:
+            tags.append(tag)
+    tags.sort(key=str.lower)
+
+    items = ""
+    for r in roles:
+        rid = escape(r.get("id", ""))
+        name = escape(r.get("name", "") or "")
+        url = escape(r.get("url", "") or "")
+        tag = (r.get("tag") or "").strip()
+        skills = r.get("skills") or []
+        body = (
+            f'<a href="{url}" target="_blank" rel="noopener">{name}</a>'
+            if url else f"<span>{name}</span>"
+        )
+        tag_html = f'<span class="todo-tag">{escape(tag)}</span>' if tag else ""
+        chips = "".join(
+            f'<span class="role-chip">{escape(str(s))}</span>' for s in skills
+        )
+        skills_html = (
+            f'<div class="role-skills">{chips}</div>' if chips
+            else '<div class="role-skills empty">No skills extracted yet</div>'
+        )
+        items += (
+            f'<li class="role-item" data-id="{rid}" data-tag="{escape(tag)}">'
+            f'<div class="todo-main">{body}{tag_html}{skills_html}</div>'
+            f'<div class="role-actions">'
+            f'<button class="mark-btn" onclick="extractRoleSkills(this)">Extract skills</button>'
+            f'<button class="todo-del" title="Delete" onclick="deleteRole(this)">×</button>'
+            f"</div>"
+            f"</li>"
+        )
+    if not items:
+        items = '<li class="todo-empty">No roles yet.</li>'
+
+    tag_options = '<option value="__all">All tags</option>'
+    for tag in tags:
+        tag_options += f'<option value="{escape(tag)}">{escape(tag)}</option>'
+    tag_datalist = "".join(f'<option value="{escape(tag)}"></option>' for tag in tags)
+
+    return f"""<details class="todo-panel roles-panel" open>
+  <summary>Roles</summary>
+  <div class="todo-filter-row">
+    <span class="todo-filter-label">Filter by tag:</span>
+    <select id="role-tag-filter" class="filter-select" onchange="filterRoles(this.value)">{tag_options}</select>
+  </div>
+  <ul class="todo-list" id="role-list">{items}</ul>
+  <div class="todo-add">
+    <input id="role-name" class="todo-input" placeholder="Role name..." onkeydown="if(event.key==='Enter')addRole()">
+    <input id="role-url" class="todo-input" placeholder="https://... job posting" onkeydown="if(event.key==='Enter')addRole()">
+    <input id="role-tag" class="todo-input todo-tag-input" list="role-tag-list" placeholder="tag (optional)" onkeydown="if(event.key==='Enter')addRole()">
+    <button class="todo-add-btn" onclick="addRole()">Add</button>
+  </div>
+  <datalist id="role-tag-list">{tag_datalist}</datalist>
 </details>"""
 
 
@@ -724,6 +792,7 @@ def render_dashboard_html() -> str:
 
     todos_html = _render_todos_html()
     links_html = _render_links_html()
+    roles_html = _render_roles_html()
     study_html = _render_study_html()
     answers_html = _render_answers_html()
 
@@ -933,6 +1002,14 @@ def render_dashboard_html() -> str:
   .link-item a {{ color: #93c5fd; text-decoration: none; }}
   .link-item a:hover {{ text-decoration: underline; }}
   .links-panel {{ border-left-color: #f59e0b; }}
+  .role-item {{ display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.45rem 0; font-size: 0.9rem; }}
+  .role-item a {{ color: #93c5fd; text-decoration: none; }}
+  .role-item a:hover {{ text-decoration: underline; }}
+  .role-skills {{ display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.35rem; }}
+  .role-skills.empty {{ color: #64748b; font-size: 0.78rem; }}
+  .role-chip {{ font-size: 0.68rem; padding: 0.05rem 0.45rem; border-radius: 999px; background: #0e7490; color: #cffafe; }}
+  .role-actions {{ margin-left: auto; display: flex; align-items: center; gap: 0.4rem; }}
+  .roles-panel {{ border-left-color: #34d399; }}
   .todo-list {{ list-style: none; margin-bottom: 0.75rem; }}
   .todo-item {{ display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; font-size: 0.9rem; }}
   .todo-item input[type=checkbox] {{ cursor: pointer; width: 15px; height: 15px; }}
@@ -971,6 +1048,10 @@ def render_dashboard_html() -> str:
   /* Personal Note for Study */
   .study-panel {{ background: #1e293b; border-radius: 12px; padding: 1.25rem; margin-bottom: 2rem; border-left: 3px solid #f59e0b; }}
   .study-panel h3 {{ font-size: 1rem; margin-bottom: 0.75rem; color: #94a3b8; }}
+  .study-panel > summary {{ cursor: pointer; font-size: 1rem; font-weight: 700; color: #94a3b8; margin-bottom: 0.75rem; list-style: none; }}
+  .study-panel > summary::-webkit-details-marker {{ display: none; }}
+  .study-panel > summary::before {{ content: "▸"; display: inline-block; width: 1rem; color: #64748b; }}
+  .study-panel[open] > summary::before {{ content: "▾"; }}
   .study-item {{ padding: 0.4rem 0; border-bottom: 1px solid #334155; font-size: 0.9rem; }}
   .study-item a {{ color: #93c5fd; text-decoration: none; font-weight: 600; }}
   .study-co {{ color: #94a3b8; font-size: 0.8rem; }}
@@ -1322,6 +1403,8 @@ def render_dashboard_html() -> str:
 {todos_html}
 
 {links_html}
+
+{roles_html}
 
 {study_html}
 
@@ -2299,6 +2382,99 @@ async function deleteLink(el) {{
   }} catch (e) {{ alert('Could not reach the dashboard server.'); }}
 }}
 
+function _roleLi(item) {{
+  const li = document.createElement('li');
+  li.className = 'role-item';
+  li.dataset.id = item.id;
+  li.dataset.tag = item.tag || '';
+  const body = item.url
+    ? '<a href="' + escapeHtml(item.url) + '" target="_blank" rel="noopener">' + escapeHtml(item.name) + '</a>'
+    : '<span>' + escapeHtml(item.name) + '</span>';
+  const tagHtml = item.tag ? '<span class="todo-tag">' + escapeHtml(item.tag) + '</span>' : '';
+  const skills = item.skills || [];
+  const chips = skills.map(s => '<span class="role-chip">' + escapeHtml(s) + '</span>').join('');
+  const skillsHtml = chips
+    ? '<div class="role-skills">' + chips + '</div>'
+    : '<div class="role-skills empty">No skills extracted yet</div>';
+  li.innerHTML = '<div class="todo-main">' + body + tagHtml + skillsHtml + '</div>' +
+    '<div class="role-actions">' +
+    '<button class="mark-btn" onclick="extractRoleSkills(this)">Extract skills</button>' +
+    '<button class="todo-del" title="Delete" onclick="deleteRole(this)">×</button>' +
+    '</div>';
+  return li;
+}}
+
+function _addRoleTagOption(tag) {{
+  const sel = document.getElementById('role-tag-filter');
+  if (sel && ![...sel.options].some(o => o.value === tag)) {{
+    const o = document.createElement('option'); o.value = tag; o.textContent = tag; sel.appendChild(o);
+  }}
+  const dl = document.getElementById('role-tag-list');
+  if (dl && ![...dl.options].some(o => o.value === tag)) {{
+    const o = document.createElement('option'); o.value = tag; dl.appendChild(o);
+  }}
+}}
+
+function filterRoles(val) {{
+  const want = val || '__all';
+  document.querySelectorAll('.role-item').forEach(li => {{
+    const tag = li.dataset.tag || '';
+    li.style.display = (want === '__all' || tag === want) ? '' : 'none';
+  }});
+}}
+
+async function addRole() {{
+  const n = document.getElementById('role-name');
+  const u = document.getElementById('role-url');
+  const g = document.getElementById('role-tag');
+  const name = (n.value || '').trim();
+  if (!name) return;
+  const tag = (g ? g.value : '').trim();
+  try {{
+    const data = await postJSON('/role/add', {{name: name, url: (u.value || '').trim(), tag: tag}});
+    if (data.ok && data.item) {{
+      document.getElementById('role-list').appendChild(_roleLi(data.item));
+      if (data.item.tag) _addRoleTagOption(data.item.tag);
+      n.value = ''; u.value = ''; if (g) g.value = '';
+      const sel = document.getElementById('role-tag-filter');
+      filterRoles(sel ? sel.value : '__all');
+    }} else {{ alert('Failed: ' + (data.error || 'unknown')); }}
+  }} catch (e) {{ alert('Could not reach the dashboard server.'); }}
+}}
+
+async function deleteRole(el) {{
+  const li = el.closest('.role-item');
+  try {{
+    const data = await postJSON('/role/delete', {{id: li.dataset.id}});
+    if (data.ok) li.remove();
+  }} catch (e) {{ alert('Could not reach the dashboard server.'); }}
+}}
+
+async function extractRoleSkills(btn) {{
+  const li = btn.closest('.role-item');
+  if (!li) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Reading...';
+  try {{
+    const data = await postJSON('/role/skills', {{id: li.dataset.id}});
+    if (data.ok) {{
+      const box = li.querySelector('.role-skills');
+      if (box) {{
+        box.classList.remove('empty');
+        box.innerHTML = (data.skills || []).map(s => '<span class="role-chip">' + escapeHtml(s) + '</span>').join('');
+      }}
+    }} else {{
+      alert('Extract failed: ' + (data.error || 'unknown'));
+    }}
+  }} catch (e) {{
+    alert('Could not reach the dashboard server.');
+  }} finally {{
+    btn.disabled = false;
+    btn.textContent = original;
+  }}
+}}
+
 async function saveNote(input) {{
   const card = input.closest('.job-card');
   const url = card ? card.dataset.url : '';
@@ -2827,6 +3003,36 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                 from applypilot.links import delete_link
                 delete_link(data.get("id") or "")
                 self._json({"ok": True})
+            elif path == "/role/add":
+                from applypilot.roles import add_role
+                name = (data.get("name") or "").strip()
+                if not name:
+                    self._json({"ok": False, "error": "name required"})
+                    return
+                roles = add_role(name, data.get("url"), data.get("tag"))
+                self._json({"ok": True, "item": roles[-1]})
+            elif path == "/role/delete":
+                from applypilot.roles import delete_role
+                delete_role(data.get("id") or "")
+                self._json({"ok": True})
+            elif path == "/role/skills":
+                from applypilot.roles import (
+                    extract_role_skills, load_roles, set_role_skills,
+                )
+                rid = data.get("id") or ""
+                role = next((r for r in load_roles() if r.get("id") == rid), None)
+                if not role:
+                    self._json({"ok": False, "error": "role not found"})
+                    return
+                try:
+                    skills = extract_role_skills(
+                        role.get("url") or "", role.get("name") or ""
+                    )
+                except Exception as exc:  # noqa: BLE001 - report to UI
+                    self._json({"ok": False, "error": str(exc)})
+                    return
+                set_role_skills(rid, skills)
+                self._json({"ok": True, "skills": skills})
             elif path == "/note":
                 url = data.get("url")
                 if not url:
