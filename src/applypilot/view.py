@@ -676,6 +676,7 @@ def render_dashboard_html() -> str:
     def _rate(n, d):
         return f"{(100.0 * n / d):.0f}%" if d else "–"
 
+    _applied_only = _n("applied", "success")
     _applied_total = _n("applied", "success", "interviewing", "offer", "rejected", "no_deal")
 
     # Recent-activity counts to keep momentum visible.
@@ -690,11 +691,12 @@ def render_dashboard_html() -> str:
     _month_n = sum(int(c) for d, c in _by_date if d and str(d) >= _month_iso)
 
     _state_rows = [
-        ("Applied (total)", _applied_total, "100%" if _applied_total else "–"),
+        ("Applied (awaiting response)", _applied_only, "100%" if _applied_only else "–"),
         ("Interviewing", _n("interviewing"), _rate(_n("interviewing"), _applied_total)),
         ("Offers", _n("offer"), _rate(_n("offer"), _applied_total)),
         ("Rejected", _n("rejected"), _rate(_n("rejected"), _applied_total)),
         ("No deal", _n("no_deal"), _rate(_n("no_deal"), _applied_total)),
+        ("Applied (total, incl. outcomes)", _applied_total, "100%" if _applied_total else "–"),
         ("Failed", _n("failed"), "–"),
         ("Not available", _n("not_available"), "–"),
         ("Not interested", _n("not_interested"), "–"),
@@ -1096,7 +1098,7 @@ def render_dashboard_html() -> str:
   <div class="stat-card stat-scored"><div class="stat-num">{scored}</div><div class="stat-label">Scored by LLM</div></div>
   <div class="stat-card stat-high"><div class="stat-num">{high_fit}</div><div class="stat-label">Strong Fit (7+)</div></div>
   <div class="stat-card stat-applied clickable-stat" onclick="quickStatus('applied')" title="Show applied jobs">
-    <div class="stat-num">{_applied_total}</div><div class="stat-label">Applied</div></div>
+    <div class="stat-num">{_applied_only}</div><div class="stat-label">Applied</div></div>
 </div>
 
 <nav class="topnav">
@@ -1377,7 +1379,9 @@ async function postMark(card, status, reason) {{
 }}
 
 function _countStatuses() {{
-  const appliedSet = ['applied', 'success', 'interviewing', 'offer', 'rejected', 'no_deal'];
+  // "Applied" counts only jobs you applied to and haven't progressed past;
+  // outcomes (interviewing/offer/rejected/no-deal) count as "other".
+  const appliedSet = ['applied', 'success'];
   let applied = 0, total = 0;
   document.querySelectorAll('.job-card').forEach(c => {{
     total++;
