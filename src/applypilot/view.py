@@ -494,10 +494,7 @@ def render_dashboard_html() -> str:
                 f'<span class="lang-flag-tag req">Language required: {language_req}</span>'
             )
         else:
-            lang_flag_html = (
-                '<span class="lang-flag-tag none">English only '
-                '(no extra language)</span>'
-            )
+            lang_flag_html = '<span class="lang-flag-tag none">No language required</span>'
         employment_type = escape(j["employment_type"] or "")
         country = escape(j["country"] or "")
         work_mode = escape(j["work_mode"] or "")
@@ -627,7 +624,7 @@ def render_dashboard_html() -> str:
 
     # Language dropdown
     lang_options = '<option value="any" selected>Any</option>'
-    lang_options += '<option value="none">English only</option>'
+    lang_options += '<option value="none">None required</option>'
     for lv in lang_values:
         lang_options += f'<option value="{lv.lower()}">{escape(lv)}</option>'
 
