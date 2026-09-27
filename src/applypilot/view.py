@@ -3460,7 +3460,7 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                     return
                 row = get_connection().execute(
                     "SELECT url, title, site, company, location, application_url, "
-                    "applied_at FROM jobs WHERE url = ?",
+                    "applied_at, full_description FROM jobs WHERE url = ?",
                     (url,),
                 ).fetchone()
                 if not row:

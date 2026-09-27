@@ -410,6 +410,29 @@ SUGGESTION: one concrete, truthful suggestion for the candidate's next move
 The CANDIDATE owns this mailbox. Keep it tight and factual."""
 
 
+_SKILLS_PROMPT = """From a job posting, list the skills in exactly two lines:
+TOP SKILLS: comma-separated must-have skills/technologies (max 12)
+NICE TO HAVE: comma-separated nice-to-have/bonus skills (max 8), or NONE
+Use ONLY the posting. No prose, no explanation."""
+
+
+def extract_job_skills(job: dict) -> str:
+    """Two-line TOP SKILLS / NICE TO HAVE block derived from the job posting."""
+    desc = (job.get("full_description") or "").strip()
+    if not desc:
+        return ""
+    client = get_client("inbox")
+    out = client.chat(
+        [
+            {"role": "system", "content": _SKILLS_PROMPT},
+            {"role": "user", "content": f"TITLE: {job.get('title')}\n\n{desc[:5000]}"},
+        ],
+        max_tokens=300,
+        temperature=0.2,
+    )
+    return (out or "").strip()
+
+
 def summarize_thread(job: dict, messages: list[dict]) -> str:
     """Ask the LLM for the status + action items from the fetched messages."""
     if not messages:
@@ -418,6 +441,7 @@ def summarize_thread(job: dict, messages: list[dict]) -> str:
     job_text = (
         f"TITLE: {job.get('title')}\n"
         f"COMPANY: {job.get('company') or job.get('site')}\n"
+        f"DESCRIPTION:\n{(job.get('full_description') or '')[:4000]}\n"
     )
     client = get_client("inbox")
     return client.chat(
@@ -496,6 +520,15 @@ def scan_and_cache(job: dict, max_results: int = 8) -> dict:
         thread_text = ""
     else:
         thread_text = _thread_text(messages)
+
+    # Skills come from the job description, independent of the email.
+    try:
+        skills = extract_job_skills(job)
+        if skills:
+            summary = f"{summary}\n\n{skills}"
+    except Exception:  # noqa: BLE001 - skills are a bonus
+        log.debug("Skill extraction failed for %s", job.get("url"))
+
     message_ids = ",".join(m["id"] for m in messages)
     save_inbox_cache(
         job["url"], message_ids, thread_text, summary,
@@ -522,7 +555,7 @@ def scan_applied_jobs(limit: int = 20, max_results: int = 8) -> dict:
     conn = get_connection()
     rows = conn.execute(
         "SELECT url, title, site, company, location, application_url, applied_at, "
-        "apply_status FROM jobs WHERE apply_status IN "
+        "apply_status, full_description FROM jobs WHERE apply_status IN "
         "('applied','success','interviewing','offer','rejected','no_deal') "
         "ORDER BY COALESCE(applied_at, '') DESC LIMIT ?",
         (int(limit),),
