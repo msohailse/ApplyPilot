@@ -729,6 +729,25 @@ def render_dashboard_html() -> str:
         f'<tr><td>{escape(str(d))}</td><td class="num">{c}</td></tr>'
         for d, c in _by_date
     ) or '<tr><td colspan="2" class="muted">No applications yet</td></tr>'
+
+    # Saved skills analysis (built from high-scoring jobs).
+    from applypilot.skills import load_skills_analysis, md_to_html
+
+    _skills = load_skills_analysis()
+    if _skills:
+        skills_body = md_to_html(_skills.get("markdown", ""))
+        _gen = (_skills.get("generated_at") or "")[:16].replace("T", " ")
+        skills_meta = (
+            f"{_skills.get('jobs', '?')} jobs &middot; score "
+            f"{_skills.get('min_score', '?')}+" + (f" &middot; {escape(_gen)}" if _gen else "")
+        )
+    else:
+        skills_body = (
+            '<p class="muted">No skills analysis yet. Click '
+            "&ldquo;Analyze skills&rdquo; to build one from your top jobs.</p>"
+        )
+        skills_meta = ""
+
     stats_html = f"""
 <div class="stats-panel">
   <div class="report-hero">
@@ -754,6 +773,16 @@ def render_dashboard_html() -> str:
   </div>
   <p class="subtitle">Stale jobs are kept here and in exports so success-rate
     stays accurate.</p>
+
+  <div class="skills-panel">
+    <h2>Skills analysis <span class="skills-meta">{skills_meta}</span></h2>
+    <div class="skills-actions">
+      <button class="mark-btn combine" onclick="analyzeSkills(this)">Analyze skills (7+)</button>
+      <button class="mark-btn" onclick="refreshSkills()">Refresh</button>
+      <button class="mark-btn combine-del" onclick="deleteSkills()">Clear</button>
+    </div>
+    <div id="skills-body" class="skills-body">{skills_body}</div>
+  </div>
 </div>"""
 
     html = f"""<!DOCTYPE html>
@@ -1047,6 +1076,21 @@ def render_dashboard_html() -> str:
   .rh-chip {{ font-size: 0.78rem; color: #cbd5e1; background: #1e293b;
     border: 1px solid #334155; border-radius: 999px; padding: 0.25rem 0.8rem; }}
   .rh-chip b {{ color: #10b981; }}
+
+  /* Skills analysis */
+  .skills-panel {{ margin-top: 1.5rem; }}
+  .skills-panel h2 {{ font-size: 1.1rem; margin-bottom: 0.75rem; }}
+  .skills-meta {{ font-size: 0.72rem; color: #64748b; font-weight: 400; margin-left: 0.5rem; }}
+  .skills-actions {{ display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }}
+  .skills-body {{ background: #0f172a; border: 1px solid #1e293b; border-radius: 10px;
+    padding: 1rem 1.25rem; max-height: 70vh; overflow: auto; }}
+  .skills-body h2 {{ font-size: 1rem; color: #93c5fd; margin: 1rem 0 0.4rem; }}
+  .skills-body h3 {{ font-size: 0.9rem; color: #cbd5e1; margin: 0.9rem 0 0.35rem; }}
+  .skills-body ul {{ margin: 0.25rem 0 0.6rem 1.2rem; }}
+  .skills-body li {{ font-size: 0.85rem; color: #cbd5e1; margin-bottom: 0.15rem; }}
+  .skills-body p {{ font-size: 0.85rem; color: #cbd5e1; margin-bottom: 0.5rem; }}
+  .skills-body code {{ background: #1e293b; padding: 0 0.3rem; border-radius: 4px; font-size: 0.8rem; }}
+  .skills-body strong {{ color: #e2e8f0; }}
   .stats-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }}
   @media (max-width: 760px) {{ .stats-grid {{ grid-template-columns: 1fr; }} }}
   .stats-table {{ width: 100%; border-collapse: collapse; background: #1e293b;
@@ -1736,6 +1780,43 @@ async function refreshCard(card) {{
   }} catch (e) {{}}
 }}
 
+async function analyzeSkills(btn) {{
+  if (!window.confirm('Analyze skills across your 7+ jobs? This calls the LLM and can take ~30-60s.')) return;
+  const t = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Analyzing...';
+  try {{
+    const d = await postJSON('/skills/analyze', {{min_score: 7}});
+    if (d.ok) {{ refreshSkills(); }} else {{ alert('Analyze failed: ' + (d.error || 'unknown')); }}
+  }} catch (e) {{
+    alert('Could not reach the dashboard server.\\nStart it with: applypilot dashboard');
+  }} finally {{
+    btn.disabled = false;
+    btn.textContent = t;
+  }}
+}}
+
+async function refreshSkills() {{
+  const el = document.getElementById('skills-body');
+  if (!el) return;
+  el.innerHTML = '<p class="muted">Loading...</p>';
+  try {{
+    const res = await fetch('/skills');
+    const d = await res.json();
+    el.innerHTML = d.ok ? d.html : '<p class="muted">' + (d.error || 'Nothing yet.') + '</p>';
+  }} catch (e) {{
+    el.innerHTML = '<p class="muted">Could not reach the dashboard server.</p>';
+  }}
+}}
+
+async function deleteSkills() {{
+  if (!window.confirm('Clear the saved skills analysis?')) return;
+  try {{
+    await postJSON('/skills/delete', {{}});
+    refreshSkills();
+  }} catch (e) {{ alert('Could not reach the dashboard server.'); }}
+}}
+
 function showTab(name, event) {{
   const jobs = document.getElementById('tab-jobs');
   const stats = document.getElementById('tab-stats');
@@ -2301,6 +2382,21 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
             if parsed.path == "/card-state":
                 self._serve_card_state(parsed.query)
                 return
+            if parsed.path == "/skills":
+                from applypilot.skills import load_skills_analysis, md_to_html
+
+                s = load_skills_analysis()
+                if not s:
+                    self._json({"ok": False, "error": "No skills analysis yet."})
+                    return
+                self._json({
+                    "ok": True,
+                    "html": md_to_html(s.get("markdown", "")),
+                    "jobs": s.get("jobs"),
+                    "min_score": s.get("min_score"),
+                    "generated_at": s.get("generated_at"),
+                })
+                return
             if parsed.path not in ("/", "/index.html"):
                 self._send(404, b"Not found", "text/plain")
                 return
@@ -2340,6 +2436,20 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                     return
                 todos = add_todo(text, data.get("url"), data.get("tag"))
                 self._json({"ok": True, "item": todos[-1]})
+            elif path == "/skills/analyze":
+                from applypilot.skills import analyze_skills
+
+                try:
+                    result = analyze_skills(min_score=int(data.get("min_score") or 7))
+                except Exception as exc:  # noqa: BLE001 - report to UI
+                    self._json({"ok": False, "error": str(exc)})
+                    return
+                self._json(result)
+            elif path == "/skills/delete":
+                from applypilot.skills import delete_skills_analysis
+
+                delete_skills_analysis()
+                self._json({"ok": True})
             elif path == "/todo/toggle":
                 from applypilot.todos import toggle_todo
                 toggle_todo(data.get("id") or "")
