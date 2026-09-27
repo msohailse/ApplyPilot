@@ -778,16 +778,6 @@ def render_dashboard_html() -> str:
   </div>
   <p class="subtitle">Stale jobs are kept here and in exports so success-rate
     stays accurate.</p>
-
-  <div class="skills-panel">
-    <h2>Skills analysis <span class="skills-meta">{skills_meta}</span></h2>
-    <div class="skills-actions">
-      <button class="mark-btn combine" onclick="analyzeSkills(this)">Analyze skills (7+)</button>
-      <button class="mark-btn" onclick="refreshSkills()">Refresh</button>
-      <button class="mark-btn combine-del" onclick="deleteSkills()">Clear</button>
-    </div>
-    <div id="skills-body" class="skills-body">{skills_body}</div>
-  </div>
 </div>"""
 
     html = f"""<!DOCTYPE html>
@@ -1083,6 +1073,12 @@ def render_dashboard_html() -> str:
   .rh-chip b {{ color: #10b981; }}
 
   /* Skills analysis */
+  .skills-panel-top {{ background: #0f172a; border: 1px solid #1e293b; border-radius: 10px;
+    margin-bottom: 1rem; padding: 0.65rem 1rem; }}
+  .skills-panel-top > summary {{ cursor: pointer; font-size: 1.02rem; font-weight: 700;
+    color: #93c5fd; }}
+  .skills-panel-top[open] > summary {{ margin-bottom: 0.6rem; }}
+  .skills-panel-top .skills-actions {{ margin: 0.4rem 0 0; }}
   .skills-panel {{ margin-top: 1.5rem; }}
   .skills-panel h2 {{ font-size: 1.1rem; margin-bottom: 0.75rem; }}
   .skills-meta {{ font-size: 0.72rem; color: #64748b; font-weight: 400; margin-left: 0.5rem; }}
@@ -1180,6 +1176,15 @@ def render_dashboard_html() -> str:
 </nav>
 
 <div id="tab-jobs">
+<details class="skills-panel-top">
+  <summary>✦ Skills analysis <span class="skills-meta">{skills_meta}</span></summary>
+  <div class="skills-actions">
+    <button class="mark-btn combine" onclick="analyzeSkills(this)">Analyze skills (7+)</button>
+    <button class="mark-btn" onclick="refreshSkills()">Refresh</button>
+    <button class="mark-btn combine-del" onclick="deleteSkills()">Clear</button>
+  </div>
+  <div id="skills-body" class="skills-body">{skills_body}</div>
+</details>
 <div class="filters">
   <button class="filter-btn focus-filter-btn" onclick="filterFocused(event)" title="Show only focused jobs">★ Focus only</button>
   <span class="filter-label" style="margin-left:1rem">Score:</span>
@@ -1792,7 +1797,13 @@ async function analyzeSkills(btn) {{
   btn.textContent = 'Analyzing...';
   try {{
     const d = await postJSON('/skills/analyze', {{min_score: 7}});
-    if (d.ok) {{ refreshSkills(); }} else {{ alert('Analyze failed: ' + (d.error || 'unknown')); }}
+    if (d.ok) {{
+      const panel = document.querySelector('.skills-panel-top');
+      if (panel) panel.setAttribute('open', '');
+      refreshSkills();
+    }} else {{
+      alert('Analyze failed: ' + (d.error || 'unknown'));
+    }}
   }} catch (e) {{
     alert('Could not reach the dashboard server.\\nStart it with: applypilot dashboard');
   }} finally {{
