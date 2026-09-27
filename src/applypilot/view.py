@@ -3360,8 +3360,8 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                     self._json({"ok": False, "error": "url required"})
                     return
                 row = get_connection().execute(
-                    "SELECT url, title, site, company, location, application_url "
-                    "FROM jobs WHERE url = ?",
+                    "SELECT url, title, site, company, location, application_url, "
+                    "applied_at FROM jobs WHERE url = ?",
                     (url,),
                 ).fetchone()
                 if not row:

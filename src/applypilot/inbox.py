@@ -122,9 +122,59 @@ def _employer_domain(job: dict) -> str:
     return ""
 
 
+_BOARD_NAMES = {"linkedin", "indeed", "glassdoor", "google", "workopolis"}
+
+# Words that carry no employer signal in a job title.
+_TITLE_STOP = {
+    "the", "and", "or", "for", "with", "of", "a", "an", "to", "in", "on", "at", "by",
+    "de", "la", "le", "les", "des", "du", "une", "un", "et", "en", "sur", "pour",
+    "senior", "junior", "mid", "lead", "staff", "principal", "head", "chief",
+    "developer", "developeur", "developpeur", "developpeuse", "engineer", "engineering",
+    "development", "full", "stack", "part", "time", "remote", "hybrid", "onsite",
+    "contract", "permanent", "freelance", "intern", "internship", "trainee",
+    "job", "role", "position", "opportunity", "needed", "wanted", "urgent", "all",
+    "h", "f", "m", "w", "d", "genders", "candidate", "consultant",
+}
+
+
+def _title_terms(title: str) -> list[str]:
+    """Distinctive, mostly tech-looking tokens from a job title.
+
+    Prefers acronyms / mixed-case / words with digits (Node, AWS, JS, C++, 3D)
+    over generic role words, and drops accented/filler tokens.
+    """
+    import unicodedata
+
+    def _deaccent(s: str) -> str:
+        return "".join(
+            c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)
+        )
+
+    scored: list[tuple[int, str]] = []
+    for w in re.findall(r"[^\W_]+", title or ""):
+        key = _deaccent(w).lower()
+        if len(key) < 2 or key in _TITLE_STOP or key.isdigit():
+            continue
+        score = 0
+        if any(ch.isupper() for ch in w[1:]):
+            score += 2
+        if any(ch.isdigit() or ch in "#+" for ch in w):
+            score += 1
+        scored.append((score, key))
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for _score, key in sorted(scored, key=lambda x: -x[0]):
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out[:4]
+
+
 def _build_query(job: dict, label: str) -> str:
     """Compose a Gmail search query for this job's company/role."""
-    name = (job.get("company") or job.get("site") or "").strip()
+    name = (job.get("company") or "").strip()
     domain = _employer_domain(job)
     keywords = (
         "(applied OR application OR interview OR recruiter OR assessment OR "
@@ -133,10 +183,22 @@ def _build_query(job: dict, label: str) -> str:
     parts = []
     if label:
         parts.append(f'label:"{label}"')
-    if name:
-        parts.append(f'"{name}"')
-    elif domain:
+    applied = (job.get("applied_at") or "")[:10]
+    if re.match(r"\d{4}-\d{2}-\d{2}", applied):
+        # Only look at mail that arrived after the application was sent.
+        parts.append(f"after:{applied.replace('-', '/')}")
+    if domain:
         parts.append(f"from:({domain})")
+    elif name and name.lower() not in _BOARD_NAMES:
+        parts.append(f'"{name}"')
+    else:
+        # No real employer on file (e.g. applied via LinkedIn/Indeed): fall back
+        # to the distinctive words of the job title.
+        terms = _title_terms(job.get("title") or "")
+        if terms:
+            parts.append("(" + " OR ".join(terms) + ")")
+        elif name:
+            parts.append(f'"{name}"')
     parts.append(keywords)
     return " ".join(parts)
 
@@ -261,6 +323,14 @@ def _category_from_summary(summary: str) -> str:
     text = (summary or "").lower()
     if "no matching emails" in text:
         return "none"
+    # If the model says the mail is unrelated, treat it as "no reply yet"
+    # rather than trusting a bogus STATUS line.
+    if any(
+        p in text
+        for p in ("unrelated", "not related", "irrelevant", "not relevant",
+                  "no relevant", "not job-related", "no job-related")
+    ):
+        return "none"
     # The summarizer emits a "STATUS: ..." line; trust that first.
     m = re.search(r"status:\s*(.+)", summary or "", re.IGNORECASE)
     status = (m.group(1) if m else text).lower()
@@ -312,8 +382,8 @@ def scan_applied_jobs(limit: int = 20, max_results: int = 8) -> dict:
 
     conn = get_connection()
     rows = conn.execute(
-        "SELECT url, title, site, company, location, application_url, apply_status "
-        "FROM jobs WHERE apply_status IN "
+        "SELECT url, title, site, company, location, application_url, applied_at, "
+        "apply_status FROM jobs WHERE apply_status IN "
         "('applied','success','interviewing','offer','rejected','no_deal') "
         "ORDER BY COALESCE(applied_at, '') DESC LIMIT ?",
         (int(limit),),
