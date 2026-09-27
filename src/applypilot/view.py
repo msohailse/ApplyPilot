@@ -580,7 +580,7 @@ def render_dashboard_html() -> str:
         inbox_html = _job_inbox_html(job_dict, inbox_summaries.get(j["url"]))
 
         job_sections += f"""
-        <div class="job-card{focused_cls}{stale_cls}{applied_cls}{highlight_cls}" data-focused="{focused_flag}" data-highlighted="{highlight_flag}" data-stale="{stale_flag}" data-score="{score}" data-url="{escape(j['url'] or '')}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}" data-apply-status="{escape(j['apply_status'] or '')}" data-applied-date="{(j['applied_at'] or '')[:10]}" data-language="{('none' if not j['language_requirement'] else (j['language_requirement'] or '').lower())}" data-employment-type="{(j['employment_type'] or '').lower()}" data-country="{(j['country'] or '').lower()}" data-work-mode="{(j['work_mode'] or '').lower()}" data-company="{(j['company'] or '').lower()}">
+        <div class="job-card{focused_cls}{stale_cls}{applied_cls}{highlight_cls}" data-focused="{focused_flag}" data-highlighted="{highlight_flag}" data-stale="{stale_flag}" data-score="{score}" data-url="{escape(j['url'] or '')}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}" data-apply-status="{escape(j['apply_status'] or '')}" data-applied-date="{(j['applied_at'] or '')[:10]}" data-applied-at="{escape(j['applied_at'] or '')}" data-language="{('none' if not j['language_requirement'] else (j['language_requirement'] or '').lower())}" data-employment-type="{(j['employment_type'] or '').lower()}" data-country="{(j['country'] or '').lower()}" data-work-mode="{(j['work_mode'] or '').lower()}" data-company="{(j['company'] or '').lower()}">
           {stale_btn}
           <div class="card-header">
             <span class="score-pill" style="background:{'#64748b' if score == 0 else ('#10b981' if score >= 7 else ('#f59e0b' if score >= 5 else '#ef4444'))}">{'–' if score == 0 else score}</span>
@@ -710,6 +710,80 @@ def render_dashboard_html() -> str:
     _today_n = sum(int(c) for d, c in _by_date if str(d) == _today_iso)
     _week_n = sum(int(c) for d, c in _by_date if d and str(d) >= _week_iso)
     _month_n = sum(int(c) for d, c in _by_date if d and str(d) >= _month_iso)
+
+    # -- Daily goal / streak (gamification) --------------------------------
+    DAILY_GOAL = 5
+    _day_counts = {str(d): int(c) for d, c in _by_date if d}
+
+    def _streak_len(counts):
+        start = _today if counts.get(_today_iso, 0) >= DAILY_GOAL else _today - _timedelta(days=1)
+        n, cur = 0, start
+        while counts.get(cur.isoformat(), 0) >= DAILY_GOAL:
+            n += 1
+            cur -= _timedelta(days=1)
+        return n
+
+    _streak = _streak_len(_day_counts)
+    _goal_days = sorted(d for d, c in _day_counts.items() if c >= DAILY_GOAL)
+    _best = _run = 0
+    _prev_day = None
+    for _ds in _goal_days:
+        try:
+            _d0 = _date.fromisoformat(_ds)
+        except ValueError:
+            continue
+        _run = _run + 1 if (_prev_day and (_d0 - _prev_day).days == 1) else 1
+        _best = max(_best, _run)
+        _prev_day = _d0
+
+    try:
+        _today_times = [
+            r[0]
+            for r in get_connection().execute(
+                "SELECT applied_at FROM jobs WHERE applied_at IS NOT NULL "
+                "AND applied_at != '' AND date(applied_at) = ? ORDER BY applied_at",
+                (_today_iso,),
+            ).fetchall()
+        ]
+    except Exception:
+        _today_times = []
+
+    def _fmt_dur(a, b):
+        from datetime import datetime as _dt
+
+        try:
+            secs = (_dt.fromisoformat(str(b)) - _dt.fromisoformat(str(a))).total_seconds()
+        except (ValueError, TypeError):
+            return ""
+        mins = int(round(secs / 60))
+        if mins < 1:
+            return "<1 min"
+        if mins < 60:
+            return f"{mins} min"
+        return f"{mins // 60}h {mins % 60}m"
+
+    _goal_met = _today_n >= DAILY_GOAL
+    _goal_time = (
+        _fmt_dur(_today_times[0], _today_times[DAILY_GOAL - 1])
+        if _goal_met and len(_today_times) >= DAILY_GOAL
+        else ""
+    )
+    _goal_pct = min(100, round(100.0 * _today_n / DAILY_GOAL)) if DAILY_GOAL else 0
+    _streak_txt = f"{_streak}-day streak" if _streak else "no streak yet"
+    _goal_time_chip = f"✅ Goal done in <b>{_goal_time}</b>" if _goal_time else ""
+    goal_hud = f"""
+<div class="goal-hud{' done' if _goal_met else ''}" id="goal-hud">
+  <div class="goal-main">
+    <div class="goal-title">🎯 Daily goal</div>
+    <div class="goal-count"><span id="goal-today">{_today_n}</span><span class="goal-of">/ {DAILY_GOAL}</span></div>
+    <div class="goal-bar"><div class="goal-bar-fill" id="goal-fill" style="width:{_goal_pct}%"></div></div>
+  </div>
+  <div class="goal-side">
+    <div class="goal-streak" id="goal-streak">{'🔥' if _streak else '🏃'} {_streak_txt}</div>
+    <div class="goal-best">best {_best} {'day' if _best == 1 else 'days'}</div>
+    <div class="goal-time" id="goal-time">{_goal_time_chip}</div>
+  </div>
+</div>"""
 
     _state_rows = [
         ("Applied (awaiting response)", _applied_only, "100%" if _applied_only else "–"),
@@ -1102,6 +1176,30 @@ def render_dashboard_html() -> str:
   .stats-table td.num, .stats-table th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
   .stats-table .muted {{ color: #64748b; }}
 
+  /* Daily goal / streak HUD */
+  .goal-hud {{ display: flex; align-items: center; justify-content: space-between;
+    gap: 1.25rem; background: linear-gradient(135deg, #111c33, #0f172a);
+    border: 1px solid #1e293b; border-radius: 12px; padding: 0.8rem 1.15rem;
+    margin-bottom: 1rem; }}
+  .goal-hud.done {{ border-color: #10b98166;
+    box-shadow: 0 0 0 1px #10b98133, 0 0 26px #10b98122; }}
+  .goal-main {{ flex: 1; min-width: 180px; }}
+  .goal-title {{ font-size: 0.68rem; letter-spacing: 0.18em; text-transform: uppercase;
+    color: #94a3b8; }}
+  .goal-count {{ font-size: 1.65rem; font-weight: 800; color: #e2e8f0; line-height: 1.15; }}
+  .goal-count .goal-of {{ font-size: 0.95rem; color: #64748b; font-weight: 600;
+    margin-left: 0.4rem; }}
+  .goal-bar {{ height: 8px; background: #1e293b; border-radius: 999px; overflow: hidden;
+    margin-top: 0.45rem; max-width: 360px; }}
+  .goal-bar-fill {{ height: 100%; width: 0; border-radius: 999px;
+    background: linear-gradient(90deg, #10b981, #34d399); transition: width 0.5s ease; }}
+  .goal-hud.done .goal-bar-fill {{ background: linear-gradient(90deg, #f59e0b, #fbbf24); }}
+  .goal-side {{ text-align: right; }}
+  .goal-streak {{ font-size: 1.05rem; font-weight: 800; color: #f59e0b; }}
+  .goal-best {{ font-size: 0.72rem; color: #64748b; }}
+  .goal-time {{ font-size: 0.8rem; color: #34d399; font-weight: 600; margin-top: 0.15rem;
+    min-height: 1em; }}
+
   /* Celebration counter on each mark */
   .celebrate {{ position: fixed; inset: 0; display: flex; align-items: center;
     justify-content: center; pointer-events: none; opacity: 0;
@@ -1114,6 +1212,12 @@ def render_dashboard_html() -> str:
     box-shadow: 0 0 44px #10b98166, 0 20px 60px #000a; }}
   .celebrate-num {{ font-size: 4.75rem; font-weight: 900; line-height: 1;
     color: #10b981; }}
+  .celebrate-num.small {{ font-size: 3.4rem; }}
+  .celebrate-emoji {{ font-size: 3.25rem; line-height: 1; margin-bottom: 0.2rem; }}
+  .celebrate-card.goal {{ border-color: #f59e0b;
+    box-shadow: 0 0 70px #f59e0b66, 0 20px 60px #000a; animation: popIn 0.3s ease-out; }}
+  .celebrate-card.goal .celebrate-num {{ color: #fbbf24; }}
+  .celebrate-card.goal .celebrate-label {{ color: #fcd34d; }}
   .celebrate-label {{ font-size: 1rem; letter-spacing: 0.25em; text-transform: uppercase;
     color: #94a3b8; margin-top: 0.4rem; }}
   .celebrate-sub {{ font-size: 0.85rem; color: #64748b; margin-top: 0.5rem; }}
@@ -1176,6 +1280,7 @@ def render_dashboard_html() -> str:
 </nav>
 
 <div id="tab-jobs">
+{goal_hud}
 <details class="skills-panel-top">
   <summary>✦ Skills analysis <span class="skills-meta">{skills_meta}</span></summary>
   <div class="skills-actions">
@@ -1437,16 +1542,23 @@ async function postMark(card, status, reason) {{
       const newStatus = (status === 'reset' ? '' : status);
       card.dataset.applyStatus = newStatus;
       const appliedNow = ['applied', 'success', 'interviewing', 'offer', 'rejected', 'no_deal'].includes(newStatus);
+      const freshApply = ['applied', 'success'].includes(newStatus);
       card.classList.toggle('is-applied', appliedNow);
       // Applying (or logging an outcome) auto-clears Focus.
       if (appliedNow) {{
         card.dataset.focused = '0';
         card.classList.remove('focused');
-        card.dataset.appliedDate = new Date().toISOString().slice(0, 10);
+        // Only a fresh application stamps "today"; an outcome keeps the original date.
+        if (freshApply) {{
+          const now = new Date();
+          card.dataset.appliedDate = _isoDay(now);
+          card.dataset.appliedAt = now.toISOString();
+        }}
         const fb = card.querySelector('.mark-btn.focus');
         if (fb) {{ fb.classList.remove('active'); fb.textContent = 'Focus'; }}
       }} else {{
         card.dataset.appliedDate = '';
+        card.dataset.appliedAt = '';
       }}
       setStatusBadge(card, newStatus);
       const badge = card.querySelector('.status-badge');
@@ -1457,6 +1569,7 @@ async function postMark(card, status, reason) {{
       // Re-apply the CURRENT filters (they stay selected) so the job moves out
       // of the view if it no longer matches, without a page reload.
       applyFilters();
+      updateGoalHud();
       if (newStatus) celebrate(newStatus);
       return true;
     }}
@@ -1467,11 +1580,13 @@ async function postMark(card, status, reason) {{
   return false;
 }}
 
+const DAILY_GOAL = 5;
+
 function _countStatuses() {{
   // "Applied" counts only jobs you applied to and haven't progressed past;
   // outcomes (interviewing/offer/rejected/no-deal) count as "other".
   const appliedSet = ['applied', 'success'];
-  const today = new Date().toISOString().slice(0, 10);
+  const today = _isoDay(new Date());
   let applied = 0, total = 0, todayCount = 0;
   document.querySelectorAll('.job-card').forEach(c => {{
     total++;
@@ -1484,9 +1599,87 @@ function _countStatuses() {{
   return {{ applied: applied, other: total - applied, today: todayCount }};
 }}
 
-function _confetti() {{
+function _isoDay(d) {{
+  return d.toISOString().slice(0, 10);
+}}
+
+// Map of YYYY-MM-DD -> number of applications that day (any status).
+function _dayCounts() {{
+  const m = {{}};
+  document.querySelectorAll('.job-card').forEach(c => {{
+    const ad = c.dataset.appliedDate || '';
+    if (ad) m[ad] = (m[ad] || 0) + 1;
+  }});
+  return m;
+}}
+
+// Consecutive days hitting the goal; today may still be "in progress".
+function _streak(m) {{
+  const today = _isoDay(new Date());
+  function back(dayStr) {{
+    let n = 0;
+    const cur = new Date(dayStr + 'T00:00:00Z');
+    while ((m[_isoDay(cur)] || 0) >= DAILY_GOAL) {{
+      n++;
+      cur.setUTCDate(cur.getUTCDate() - 1);
+    }}
+    return n;
+  }}
+  if ((m[today] || 0) >= DAILY_GOAL) return back(today);
+  const y = new Date();
+  y.setUTCDate(y.getUTCDate() - 1);
+  return back(_isoDay(y));
+}}
+
+function _todayTimes() {{
+  const today = _isoDay(new Date());
+  const arr = [];
+  document.querySelectorAll('.job-card').forEach(c => {{
+    const at = c.dataset.appliedAt || '';
+    if (at && at.slice(0, 10) === today) {{
+      const t = Date.parse(at);
+      if (!isNaN(t)) arr.push(t);
+    }}
+  }});
+  return arr.sort((a, b) => a - b);
+}}
+
+function _fmtDur(ms) {{
+  const m = Math.round(ms / 60000);
+  if (m < 1) return '<1 min';
+  if (m < 60) return m + ' min';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}}
+
+function updateGoalHud() {{
+  const hud = document.getElementById('goal-hud');
+  if (!hud) return;
+  const m = _dayCounts();
+  const n = m[_isoDay(new Date())] || 0;
+  hud.classList.toggle('done', n >= DAILY_GOAL);
+  const t = document.getElementById('goal-today');
+  if (t) t.textContent = n;
+  const fill = document.getElementById('goal-fill');
+  if (fill) fill.style.width = Math.min(100, Math.round(100 * n / DAILY_GOAL)) + '%';
+  const s = _streak(m);
+  const st = document.getElementById('goal-streak');
+  if (st) st.textContent = (s ? '🔥 ' + s + '-day streak' : '🏃 no streak yet');
+  const gt = document.getElementById('goal-time');
+  if (gt) {{
+    const times = _todayTimes();
+    if (n >= DAILY_GOAL && times.length >= DAILY_GOAL) {{
+      // Time spent = first application today -> the one that hit the goal.
+      gt.innerHTML = '✅ Goal done in <b>' + _fmtDur(times[DAILY_GOAL - 1] - times[0]) + '</b>';
+    }} else {{
+      gt.innerHTML = '';
+    }}
+  }}
+}}
+
+function _confetti(count) {{
   const colors = ['#10b981', '#f59e0b', '#60a5fa', '#ef4444', '#a78bfa', '#34d399'];
-  for (let i = 0; i < 44; i++) {{
+  const n = count || 44;
+  for (let i = 0; i < n; i++) {{
     const p = document.createElement('div');
     p.className = 'confetti-piece';
     p.style.left = (Math.random() * 100) + 'vw';
@@ -1500,6 +1693,8 @@ function _confetti() {{
 
 function celebrate(kind) {{
   const c = _countStatuses();
+  const m = _dayCounts();
+  const n = m[_isoDay(new Date())] || 0;
   let host = document.getElementById('celebrate');
   if (!host) {{
     host = document.createElement('div');
@@ -1507,16 +1702,36 @@ function celebrate(kind) {{
     host.className = 'celebrate';
     document.body.appendChild(host);
   }}
-  const win = (kind === 'applied' || kind === 'success') ? ' win' : '';
-  host.innerHTML = '<div class="celebrate-card' + win + '">' +
-    '<div class="celebrate-num">' + c.today + '</div>' +
-    '<div class="celebrate-label">Applied today</div>' +
-    '<div class="celebrate-sub">' + c.applied + ' total so far</div>' +
-    '</div>';
+  const win = (kind === 'applied' || kind === 'success');
+  const goalHit = win && n >= DAILY_GOAL;
+  let inner;
+  if (goalHit) {{
+    const times = _todayTimes();
+    const spent = (times.length >= DAILY_GOAL) ? _fmtDur(times[DAILY_GOAL - 1] - times[0]) : '';
+    const s = _streak(m);
+    inner = '<div class="celebrate-card win goal">' +
+      '<div class="celebrate-emoji">🔥</div>' +
+      '<div class="celebrate-num small">' + n + '/' + DAILY_GOAL + '</div>' +
+      '<div class="celebrate-label">Daily goal complete!</div>' +
+      '<div class="celebrate-sub">' +
+        (spent ? 'in ' + spent + ' · ' : '') +
+        (s ? '🔥 ' + s + '-day streak · ' : '') +
+        c.applied + ' total so far</div>' +
+      '</div>';
+  }} else {{
+    const left = Math.max(0, DAILY_GOAL - n);
+    inner = '<div class="celebrate-card' + (win ? ' win' : '') + '">' +
+      '<div class="celebrate-num">' + n + '</div>' +
+      '<div class="celebrate-label">Applied today</div>' +
+      '<div class="celebrate-sub">' + c.applied + ' total so far' +
+        (win && left ? ' · ' + left + ' to goal' : '') + '</div>' +
+      '</div>';
+  }}
+  host.innerHTML = inner;
   host.classList.add('show');
-  if (win) _confetti();
+  if (win) _confetti(goalHit ? 90 : 44);
   clearTimeout(window._celebrateTimer);
-  window._celebrateTimer = setTimeout(() => host.classList.remove('show'), 2200);
+  window._celebrateTimer = setTimeout(() => host.classList.remove('show'), goalHit ? 3200 : 2200);
 }}
 
 async function markJob(btn, status) {{
@@ -1845,6 +2060,7 @@ function showTab(name, event) {{
 function quickStatus(val) {{
   // Jump to the Jobs tab showing a single status (e.g. Applied card click).
   showTab('jobs');
+  updateGoalHud();
   statusFilter = val;
   focusFilter = false; siteFilter = ''; exactScore = null; minScore = -1;
   document.querySelectorAll('.focus-filter-btn, .score-row.clickable, .site-row.clickable')
