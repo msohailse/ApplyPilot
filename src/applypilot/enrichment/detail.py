@@ -33,6 +33,21 @@ log = logging.getLogger(__name__)
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
+# Values the LLM/scraper sometimes return to mean "nothing".
+_URL_JUNK = {"", "-", "none", "null", "n/a", "na", "undefined", "false"}
+
+
+def clean_apply_url(value) -> str | None:
+    """Return a usable http(s) apply URL, or None for junk/empty values."""
+    if value is None:
+        return None
+    s = str(value).strip().strip('"').strip("'")
+    if s.lower() in _URL_JUNK:
+        return None
+    if not s.lower().startswith(("http://", "https://")):
+        return None
+    return s
+
 # Sites that block scraping -- skip detail extraction entirely
 SKIP_DETAIL_SITES = {"glassdoor", "google", "Workopolis"}
 
@@ -117,6 +132,10 @@ def resolve_all_urls(conn: sqlite3.Connection) -> dict:
     ).fetchall()
     for row in rows:
         url, site, app_url = row[0], row[1], row[2]
+        if clean_apply_url(app_url) is None:
+            # Junk value (e.g. the literal "None") -> clear it.
+            conn.execute("UPDATE jobs SET application_url = NULL WHERE url = ?", (url,))
+            continue
         new_app = resolve_url(app_url, site)
         if new_app and new_app != app_url:
             conn.execute("UPDATE jobs SET application_url = ? WHERE url = ?", (new_app, url))
@@ -475,7 +494,7 @@ def extract_with_llm(page, url: str) -> dict:
         from applypilot.discovery.smartextract import extract_json
         result = extract_json(raw)
         desc = result.get("full_description")
-        apply_url = result.get("application_url")
+        apply_url = clean_apply_url(result.get("application_url"))
 
         if desc:
             desc = clean_description(desc)
@@ -648,7 +667,10 @@ def scrape_detail_page(page, url: str) -> dict:
     # Tier 3: LLM
     llm_result = extract_with_llm(page, url)
     result["full_description"] = llm_result.get("full_description")
-    result["application_url"] = llm_result.get("application_url") or tier2_apply
+    result["application_url"] = (
+        clean_apply_url(llm_result.get("application_url"))
+        or clean_apply_url(tier2_apply)
+    )
     result["tier_used"] = 3
 
     if result.get("full_description"):
@@ -739,7 +761,7 @@ def scrape_site_batch(
                         "detail_scraped_at = ?, detail_error = NULL, "
                         "language_requirement = ?, employment_type = ?, "
                         "country = ?, work_mode = ? WHERE url = ?",
-                        (desc, result.get("application_url"), now,
+                        (desc, clean_apply_url(result.get("application_url")), now,
                          tags["language_requirement"], tags["employment_type"],
                          tags["country"], tags["work_mode"], url),
                     )

@@ -433,7 +433,12 @@ def render_dashboard_html() -> str:
         location = escape(j["location"] or "")
         site = escape(j["site"] or "")
         site_color = colors.get(j["site"] or "", "#6b7280")
-        apply_url = escape(j["application_url"] or "")
+        # Use the apply URL only when it's a real link; otherwise fall back to
+        # the posting URL so the Apply button never points at "/None".
+        apply_url_raw = (j["application_url"] or "").strip()
+        if not apply_url_raw.lower().startswith(("http://", "https://")):
+            apply_url_raw = (j["url"] or "").strip()
+        apply_url = escape(apply_url_raw)
         language_req = escape(j["language_requirement"] or "")
         job_note = escape(j["notes"] or "")
         company_display = escape(j["company"] or "")
