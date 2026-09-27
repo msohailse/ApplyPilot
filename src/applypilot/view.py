@@ -1710,8 +1710,10 @@ function quickStatus(val) {{
     .forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.score-btn').forEach(b =>
     b.classList.toggle('active', b.textContent.trim() === 'All'));
-  document.querySelectorAll('.status-btn').forEach(b =>
-    b.classList.toggle('active', (b.getAttribute('onclick') || '').includes("filterStatus('" + val + "'"))));
+  document.querySelectorAll('.status-btn').forEach(b => {{
+    const oc = b.getAttribute('onclick') || '';
+    b.classList.toggle('active', oc.includes("filterStatus('" + val + "')"));
+  }});
   applyFilters();
 }}
 
