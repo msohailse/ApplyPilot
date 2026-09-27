@@ -118,6 +118,91 @@ def _render_todos_html() -> str:
 </div>"""
 
 
+def _job_files_html(job: dict) -> str:
+    """Files row (Resume/Cover links, each with a per-file delete ×)."""
+    job_url_q = quote(job.get("url") or "")
+    resume_txt = job.get("tailored_resume_path") or ""
+    combined_tex = job.get("combined_tex_path") or ""
+    cover_txt = job.get("cover_letter_path") or ""
+    items: list[str] = []
+
+    def add(kind: str, label: str, path: "Path | None") -> None:
+        if not path or not path.exists():
+            return
+        items.append(
+            f'<span class="file-item">'
+            f'<a class="file-link" href="/job-file?url={job_url_q}&kind={kind}" target="_blank">{label}</a>'
+            f'<button class="file-x" title="Delete {label} permanently" '
+            f'onclick="deleteJobFile(this, \'{kind}\', \'{label}\')">×</button>'
+            f'</span>'
+        )
+
+    if resume_txt:
+        add("resume_pdf", "Resume PDF", Path(resume_txt).with_suffix(".pdf"))
+        add("resume_txt", "Resume TXT", Path(resume_txt))
+    if combined_tex:
+        add("resume_tex", "Resume TEX", Path(combined_tex))
+    if cover_txt:
+        add("cover_pdf", "Cover PDF", Path(cover_txt).with_suffix(".pdf"))
+        add("cover_txt", "Cover TXT", Path(cover_txt))
+    return (
+        f'<div class="files-row"><span class="files-label">Files:</span>{"".join(items)}</div>'
+        if items else ""
+    )
+
+
+def _job_actions_html(job: dict) -> str:
+    """Generate Resume / Generate Cover Letter buttons."""
+    html = ""
+    if job.get("full_description"):
+        html += (
+            '<button class="mark-btn combine" onclick="combineResume(this)" '
+            'title="Tailor this job (if needed) and render into your LaTeX resume">Generate Resume</button>'
+        )
+        html += (
+            '<button class="mark-btn cover-generate" onclick="generateCoverLetter(this)" '
+            'title="Generate a cover letter for this job">Generate Cover Letter</button>'
+        )
+    return html
+
+
+def _job_concepts_html(job: dict) -> str:
+    """Key-concepts chips row (from the highlight LLM extraction)."""
+    import json as _json
+
+    try:
+        concepts = _json.loads(job.get("highlight_concepts") or "[]")
+    except (ValueError, TypeError):
+        concepts = []
+    if not concepts:
+        return ""
+    chips = "".join(f'<span class="concept-chip">{escape(str(c))}</span>' for c in concepts)
+    return f'<div class="highlight-row"><span class="highlight-label">Key concepts:</span>{chips}</div>'
+
+
+def _job_inbox_html(job: dict, inbox_cached: str | None) -> str:
+    """Inbox-insights panel for a job (only when cached or applied)."""
+    st = job.get("apply_status") or ""
+    if inbox_cached is None and st not in ("applied", "success"):
+        return ""
+    if inbox_cached is not None:
+        return (
+            '<div class="inbox-panel">'
+            '<div class="inbox-head">'
+            '<span class="inbox-title">Inbox insights</span>'
+            '<button class="mark-btn inbox-scan" onclick="scanInbox(this)">Refresh</button>'
+            '<button class="mark-btn combine-del" onclick="freeInbox(this)">Free</button>'
+            '</div>'
+            f'<pre class="inbox-body">{escape(inbox_cached)}</pre>'
+            '</div>'
+        )
+    return (
+        '<div class="inbox-panel">'
+        '<button class="mark-btn inbox-scan" onclick="scanInbox(this)">Inbox Insights</button>'
+        '</div>'
+    )
+
+
 def render_dashboard_html() -> str:
     """Build the full HTML dashboard as a string.
 
@@ -420,73 +505,14 @@ def render_dashboard_html() -> str:
             )
 
         # Generated documents (tailored resume + cover letter) as clickable links.
-        job_url_q = quote(j["url"] or "")
-        resume_txt = j["tailored_resume_path"] or ""
-        combined_tex = j["combined_tex_path"] or ""
-        cover_txt = j["cover_letter_path"] or ""
-        file_items = []
+        job_dict = dict(j)
+        files_html = _job_files_html(job_dict)
 
-        def _add_file(kind: str, label: str, path: "Path | None") -> None:
-            if not path or not path.exists():
-                return
-            file_items.append(
-                f'<span class="file-item">'
-                f'<a class="file-link" href="/job-file?url={job_url_q}&kind={kind}" target="_blank">{label}</a>'
-                f'<button class="file-x" title="Delete {label} permanently" '
-                f'onclick="deleteJobFile(this, \'{kind}\', \'{label}\')">×</button>'
-                f'</span>'
-            )
+        # Generate Resume / Generate Cover Letter (on demand).
+        combine_html = _job_actions_html(job_dict)
 
-        if resume_txt:
-            _add_file("resume_pdf", "Resume PDF", Path(resume_txt).with_suffix(".pdf"))
-            _add_file("resume_txt", "Resume TXT", Path(resume_txt))
-        if combined_tex:
-            _add_file("resume_tex", "Resume TEX", Path(combined_tex))
-        if cover_txt:
-            _add_file("cover_pdf", "Cover PDF", Path(cover_txt).with_suffix(".pdf"))
-            _add_file("cover_txt", "Cover TXT", Path(cover_txt))
-        files_html = (
-            f'<div class="files-row"><span class="files-label">Files:</span>{"".join(file_items)}</div>'
-            if file_items else ""
-        )
-
-        # Generate Resume: tailor this job on demand (only if it has no tailored
-        # text yet) and render the result into the base LaTeX resume.
-        combine_html = ""
-        if j["full_description"]:
-            combine_html += (
-                '<button class="mark-btn combine" onclick="combineResume(this)" '
-                'title="Tailor this job (if needed) and render into your LaTeX resume">Generate Resume</button>'
-            )
-        # Generate Cover Letter: on demand, using COVER_LETTER_PROMPT from .env.
-        if j["full_description"]:
-            combine_html += (
-                '<button class="mark-btn cover-generate" onclick="generateCoverLetter(this)" '
-                'title="Generate a cover letter for this job">Generate Cover Letter</button>'
-            )
-
-        # Inbox insights: only on applied jobs (or when already cached). Cached,
-        # never regenerated until the user hits "Free".
-        inbox_html = ""
-        inbox_cached = inbox_summaries.get(j["url"])
-        if inbox_cached is not None or st in ("applied", "success"):
-            if inbox_cached is not None:
-                inbox_html = (
-                    '<div class="inbox-panel">'
-                    '<div class="inbox-head">'
-                    '<span class="inbox-title">Inbox insights</span>'
-                    '<button class="mark-btn inbox-scan" onclick="scanInbox(this)">Refresh</button>'
-                    '<button class="mark-btn combine-del" onclick="freeInbox(this)">Free</button>'
-                    '</div>'
-                    f'<pre class="inbox-body">{escape(inbox_cached)}</pre>'
-                    '</div>'
-                )
-            else:
-                inbox_html = (
-                    '<div class="inbox-panel">'
-                    '<button class="mark-btn inbox-scan" onclick="scanInbox(this)">'
-                    'Inbox Insights</button></div>'
-                )
+        # Inbox insights: only on applied jobs (or when already cached).
+        inbox_html = _job_inbox_html(job_dict, inbox_summaries.get(j["url"]))
 
         job_sections += f"""
         <div class="job-card{focused_cls}{stale_cls}{applied_cls}{highlight_cls}" data-focused="{focused_flag}" data-highlighted="{highlight_flag}" data-stale="{stale_flag}" data-score="{score}" data-url="{escape(j['url'] or '')}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}" data-apply-status="{escape(j['apply_status'] or '')}" data-language="{('none' if not j['language_requirement'] else (j['language_requirement'] or '').lower())}" data-employment-type="{(j['employment_type'] or '').lower()}" data-country="{(j['country'] or '').lower()}" data-work-mode="{(j['work_mode'] or '').lower()}" data-company="{(j['company'] or '').lower()}">
@@ -503,12 +529,12 @@ def render_dashboard_html() -> str:
           </div>
           <div class="meta-row">{meta_html}</div>
           {f'<div class="keywords-row">{escape(keywords)}</div>' if keywords else ''}
-          {concepts_html}
+          <div class="concepts-slot">{concepts_html}</div>
           {f'<div class="reasoning-row">{escape(reasoning)}</div>' if reasoning else ''}
           <p class="desc-preview">{desc_preview}...</p>
           {"<details class='full-desc-details'><summary class='expand-btn'>Full Description (" + f'{desc_len:,}' + " chars)</summary><div class='full-desc'>" + full_desc_html + "</div></details>" if j["full_description"] else ""}
-          {files_html}
-          {inbox_html}
+          <div class="files-slot">{files_html}</div>
+          <div class="inbox-slot">{inbox_html}</div>
           <div class="mark-row">
             <button class="mark-btn view" onclick="openJobModal(this)">View</button>
             <button class="mark-btn pass" onclick="markJob(this,'applied')">Applied</button>
@@ -516,7 +542,7 @@ def render_dashboard_html() -> str:
             <button class="mark-btn na" onclick="markJob(this,'not_available')">Not Available</button>
             <button class="mark-btn ni" onclick="markJob(this,'not_interested')">Not Interested</button>
             <span class="outcome-btns">{outcome_btns}</span>
-            {combine_html}
+            <span class="actions-slot">{combine_html}</span>
           </div>
           <div class="lang-flag">{lang_flag_html}</div>
           <div class="job-note">
@@ -1199,7 +1225,7 @@ async function combineResume(btn) {{
     if (data.ok) {{
       if (data.fallback) alert('No LaTeX base found - used the default PDF pipeline.');
       btn.textContent = 'Generated';
-      setTimeout(() => {{ location.reload(); }}, 600);
+      refreshCard(card);
     }} else {{
       alert('Generate failed: ' + (data.error || 'unknown'));
       btn.disabled = false;
@@ -1224,7 +1250,7 @@ async function deleteCombined(btn) {{
   try {{
     const data = await postJSON('/combine/delete', {{url: url}});
     if (data.ok) {{
-      setTimeout(() => {{ location.reload(); }}, 300);
+      refreshCard(card);
     }} else {{
       alert('Delete failed: ' + (data.error || 'unknown'));
       btn.disabled = false;
@@ -1250,7 +1276,7 @@ async function generateCoverLetter(btn) {{
     const data = await postJSON('/cover', {{url: url, extra: extra}});
     if (data.ok) {{
       btn.textContent = 'Generated';
-      setTimeout(() => {{ location.reload(); }}, 600);
+      refreshCard(card);
     }} else {{
       alert('Cover letter failed: ' + (data.error || 'unknown'));
       btn.disabled = false;
@@ -1275,7 +1301,7 @@ async function deleteCoverLetter(btn) {{
   try {{
     const data = await postJSON('/cover/delete', {{url: url}});
     if (data.ok) {{
-      setTimeout(() => {{ location.reload(); }}, 300);
+      refreshCard(card);
     }} else {{
       alert('Delete failed: ' + (data.error || 'unknown'));
       btn.disabled = false;
@@ -1298,7 +1324,7 @@ async function deleteJobFile(btn, kind, label) {{
   try {{
     const data = await postJSON('/file/delete', {{url: url, kind: kind}});
     if (data.ok) {{
-      setTimeout(() => {{ location.reload(); }}, 200);
+      refreshCard(card);
     }} else {{
       alert('Delete failed: ' + (data.error || 'unknown'));
       btn.disabled = false;
@@ -1320,7 +1346,7 @@ async function scanInbox(btn) {{
   try {{
     const data = await postJSON('/inbox/scan', {{url: url}});
     if (data.ok) {{
-      setTimeout(() => {{ location.reload(); }}, 400);
+      refreshCard(card);
     }} else {{
       alert('Inbox scan failed: ' + (data.error || 'unknown'));
       btn.disabled = false;
@@ -1342,7 +1368,7 @@ async function freeInbox(btn) {{
   try {{
     const data = await postJSON('/inbox/free', {{url: url}});
     if (data.ok) {{
-      setTimeout(() => {{ location.reload(); }}, 200);
+      refreshCard(card);
     }} else {{
       alert('Failed: ' + (data.error || 'unknown'));
     }}
@@ -1407,7 +1433,7 @@ async function toggleHighlight(btn) {{
       if (next && data.concepts && data.concepts.length === 0) {{
         alert('No concepts extracted (no job description on file).');
       }}
-      location.reload();
+      refreshCard(card);
     }} else {{
       alert('Highlight failed: ' + (data.error || 'unknown'));
       btn.disabled = false;
@@ -1418,6 +1444,30 @@ async function toggleHighlight(btn) {{
     btn.disabled = false;
     btn.textContent = original;
   }}
+}}
+
+async function refreshCard(card) {{
+  // Update just this card's fragments instead of reloading the whole dashboard.
+  if (!card) return;
+  const url = card.dataset.url;
+  if (!url) return;
+  try {{
+    const res = await fetch('/card-state?url=' + encodeURIComponent(url));
+    const d = await res.json();
+    if (!d.ok) return;
+    const fs = card.querySelector('.files-slot'); if (fs) fs.innerHTML = d.files_html;
+    const cs = card.querySelector('.concepts-slot'); if (cs) cs.innerHTML = d.concepts_html;
+    const as = card.querySelector('.actions-slot'); if (as) as.innerHTML = d.actions_html;
+    const is = card.querySelector('.inbox-slot'); if (is) is.innerHTML = d.inbox_html;
+    card.dataset.highlighted = d.highlighted ? '1' : '0';
+    card.classList.toggle('highlighted', !!d.highlighted);
+    const hb = card.querySelector('.mark-btn.highlight');
+    if (hb) {{
+      hb.classList.toggle('active', !!d.highlighted);
+      hb.textContent = d.highlighted ? 'Remove Highlight' : 'Generate Highlight';
+      hb.disabled = false;
+    }}
+  }} catch (e) {{}}
 }}
 
 function showTab(name, event) {{
@@ -1859,10 +1909,37 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
             self.end_headers()
             self.wfile.write(body)
 
+        def _serve_card_state(self, query: str) -> None:
+            """Return the per-job card fragments so the browser can update a card
+            in place instead of reloading the whole (large) dashboard."""
+            url = (parse_qs(query).get("url") or [""])[0]
+            if not url:
+                self._json({"ok": False, "error": "url required"})
+                return
+            row = get_connection().execute(
+                "SELECT * FROM jobs WHERE url = ?", (url,)
+            ).fetchone()
+            if not row:
+                self._json({"ok": False, "error": "job not found"})
+                return
+            job = dict(row)
+            inbox = get_inbox_summaries().get(url)
+            self._json({
+                "ok": True,
+                "files_html": _job_files_html(job),
+                "actions_html": _job_actions_html(job),
+                "concepts_html": _job_concepts_html(job),
+                "inbox_html": _job_inbox_html(job, inbox),
+                "highlighted": int(job.get("highlighted") or 0),
+            })
+
         def do_GET(self):
             parsed = urlparse(self.path)
             if parsed.path == "/job-file":
                 self._serve_job_file(parsed.query)
+                return
+            if parsed.path == "/card-state":
+                self._serve_card_state(parsed.query)
                 return
             if parsed.path not in ("/", "/index.html"):
                 self._send(404, b"Not found", "text/plain")
