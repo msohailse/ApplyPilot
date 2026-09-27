@@ -575,7 +575,7 @@ def render_dashboard_html() -> str:
         inbox_html = _job_inbox_html(job_dict, inbox_summaries.get(j["url"]))
 
         job_sections += f"""
-        <div class="job-card{focused_cls}{stale_cls}{applied_cls}{highlight_cls}" data-focused="{focused_flag}" data-highlighted="{highlight_flag}" data-stale="{stale_flag}" data-score="{score}" data-url="{escape(j['url'] or '')}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}" data-apply-status="{escape(j['apply_status'] or '')}" data-language="{('none' if not j['language_requirement'] else (j['language_requirement'] or '').lower())}" data-employment-type="{(j['employment_type'] or '').lower()}" data-country="{(j['country'] or '').lower()}" data-work-mode="{(j['work_mode'] or '').lower()}" data-company="{(j['company'] or '').lower()}">
+        <div class="job-card{focused_cls}{stale_cls}{applied_cls}{highlight_cls}" data-focused="{focused_flag}" data-highlighted="{highlight_flag}" data-stale="{stale_flag}" data-score="{score}" data-url="{escape(j['url'] or '')}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}" data-apply-status="{escape(j['apply_status'] or '')}" data-applied-date="{(j['applied_at'] or '')[:10]}" data-language="{('none' if not j['language_requirement'] else (j['language_requirement'] or '').lower())}" data-employment-type="{(j['employment_type'] or '').lower()}" data-country="{(j['country'] or '').lower()}" data-work-mode="{(j['work_mode'] or '').lower()}" data-company="{(j['company'] or '').lower()}">
           {stale_btn}
           <div class="card-header">
             <span class="score-pill" style="background:{'#64748b' if score == 0 else ('#10b981' if score >= 7 else ('#f59e0b' if score >= 5 else '#ef4444'))}">{'–' if score == 0 else score}</span>
@@ -1388,8 +1388,11 @@ async function postMark(card, status, reason) {{
       if (appliedNow) {{
         card.dataset.focused = '0';
         card.classList.remove('focused');
+        card.dataset.appliedDate = new Date().toISOString().slice(0, 10);
         const fb = card.querySelector('.mark-btn.focus');
         if (fb) {{ fb.classList.remove('active'); fb.textContent = 'Focus'; }}
+      }} else {{
+        card.dataset.appliedDate = '';
       }}
       setStatusBadge(card, newStatus);
       const badge = card.querySelector('.status-badge');
@@ -1414,12 +1417,17 @@ function _countStatuses() {{
   // "Applied" counts only jobs you applied to and haven't progressed past;
   // outcomes (interviewing/offer/rejected/no-deal) count as "other".
   const appliedSet = ['applied', 'success'];
-  let applied = 0, total = 0;
+  const today = new Date().toISOString().slice(0, 10);
+  let applied = 0, total = 0, todayCount = 0;
   document.querySelectorAll('.job-card').forEach(c => {{
     total++;
-    if (appliedSet.includes(c.dataset.applyStatus || '')) applied++;
+    const s = c.dataset.applyStatus || '';
+    if (appliedSet.includes(s)) {{
+      applied++;
+      if ((c.dataset.appliedDate || '') === today) todayCount++;
+    }}
   }});
-  return {{ applied: applied, other: total - applied }};
+  return {{ applied: applied, other: total - applied, today: todayCount }};
 }}
 
 function _confetti() {{
@@ -1447,9 +1455,9 @@ function celebrate(kind) {{
   }}
   const win = (kind === 'applied' || kind === 'success') ? ' win' : '';
   host.innerHTML = '<div class="celebrate-card' + win + '">' +
-    '<div class="celebrate-num">' + c.applied + '</div>' +
-    '<div class="celebrate-label">Applied</div>' +
-    '<div class="celebrate-sub">vs ' + c.other + ' other' + (c.other === 1 ? '' : 's') + '</div>' +
+    '<div class="celebrate-num">' + c.today + '</div>' +
+    '<div class="celebrate-label">Applied today</div>' +
+    '<div class="celebrate-sub">' + c.applied + ' total so far</div>' +
     '</div>';
   host.classList.add('show');
   if (win) _confetti();
