@@ -232,6 +232,27 @@ def _decode(data: str) -> str:
         return ""
 
 
+def _html_to_text(html: str) -> str:
+    """Convert an HTML email body to clean readable text."""
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style", "img", "head"]):
+            tag.decompose()
+        # Keep link targets visible next to their text.
+        for a in soup.find_all("a"):
+            href = (a.get("href") or "").strip()
+            if href.startswith("http") and href not in (a.get_text() or ""):
+                a.append(f" ({href})")
+        text = soup.get_text("\n")
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+    except Exception:  # noqa: BLE001 - fall back to crude stripping
+        return re.sub(r"<[^>]+>", " ", html or "").strip()
+
+
 def _extract_body(payload: dict) -> str:
     def walk(part: dict) -> str:
         mime = part.get("mimeType", "")
@@ -243,7 +264,8 @@ def _extract_body(payload: dict) -> str:
             if text:
                 return text
         if data:
-            return _decode(data)
+            raw = _decode(data)
+            return _html_to_text(raw) if mime == "text/html" else raw
         return ""
 
     return walk(payload or {})
