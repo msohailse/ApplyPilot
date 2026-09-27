@@ -1714,9 +1714,11 @@ async function postMark(card, status, reason) {{
       card.style.transition = 'box-shadow 0.3s';
       card.style.boxShadow = '0 0 0 2px #10b98188';
       setTimeout(() => {{ card.style.boxShadow = ''; }}, 700);
-      // Re-apply the CURRENT filters (they stay selected) so the job moves out
-      // of the view if it no longer matches, without a page reload.
-      applyFilters();
+      // Keep the just-marked card on screen (so it does not vanish under you),
+      // and re-apply filters for everything else. The keep flag clears as soon
+      // as you touch a filter again.
+      card.dataset.keep = '1';
+      applyFilters(true);
       updateGoalHud();
       if (newStatus) celebrate(newStatus);
       return true;
@@ -2638,13 +2640,34 @@ function resetAllFilters() {{
   applyFilters();
 }}
 
-function applyFilters() {{
+// Cache a small lowercase searchable string per card (title/site/company/
+// location/keywords). Calling textContent on the full card is expensive
+// because each card embeds a big job description.
+function _cardSearchText(card) {{
+  if (card._st !== undefined) return card._st;
+  const titleEl = card.querySelector('.job-title');
+  const kwEl = card.querySelector('.keywords-row');
+  const parts = [
+    titleEl ? titleEl.textContent : '',
+    card.dataset.site || '',
+    card.dataset.company || '',
+    card.dataset.location || '',
+    kwEl ? kwEl.textContent : '',
+  ];
+  card._st = parts.join(' ').toLowerCase();
+  return card._st;
+}}
+
+function applyFilters(preserveKeep) {{
+  if (!preserveKeep) {{
+    document.querySelectorAll('.job-card[data-keep="1"]').forEach(c => {{ c.dataset.keep = ''; }});
+  }}
   let shown = 0;
   let total = 0;
   document.querySelectorAll('.job-card').forEach(card => {{
     total++;
     const score = parseInt(card.dataset.score) || 0;
-    const text = card.textContent.toLowerCase();
+    const text = _cardSearchText(card);
     const applyStatus = card.dataset.applyStatus;
     const lang = card.dataset.language || 'none';
     const type = card.dataset.employmentType || '';
@@ -2690,7 +2713,8 @@ function applyFilters() {{
     const site = (card.dataset.site || '').toLowerCase();
     const siteMatch = !siteFilter || site === siteFilter.toLowerCase();
 
-    if (scoreMatch && textMatch && statusMatch && langMatch && typeMatch && countryMatch && modeMatch && companyMatch && focusMatch && siteMatch) {{
+    const keep = card.dataset.keep === '1';
+    if (keep || (scoreMatch && textMatch && statusMatch && langMatch && typeMatch && countryMatch && modeMatch && companyMatch && focusMatch && siteMatch)) {{
       card.classList.remove('hidden');
       shown++;
     }} else {{
