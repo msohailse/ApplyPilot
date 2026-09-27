@@ -168,6 +168,25 @@ def get_base_resume_tex() -> Path | None:
     return None
 
 
+def get_gmail_config() -> dict:
+    """Resolve Gmail integration paths/settings from the environment.
+
+    - `GMAIL_CREDENTIALS_PATH`: downloaded Google OAuth Desktop client JSON
+      (default `~/.applypilot/gmail_credentials.json`).
+    - `GMAIL_TOKEN_PATH`: where the authorized refresh token is stored
+      (default `~/.applypilot/gmail_token.json`).
+    - `GMAIL_LABEL`: optional Gmail label to restrict the search to.
+    """
+    load_env()
+    creds = os.environ.get("GMAIL_CREDENTIALS_PATH", "").strip()
+    token = os.environ.get("GMAIL_TOKEN_PATH", "").strip()
+    return {
+        "credentials": Path(creds).expanduser() if creds else APP_DIR / "gmail_credentials.json",
+        "token": Path(token).expanduser() if token else APP_DIR / "gmail_token.json",
+        "label": os.environ.get("GMAIL_LABEL", "").strip(),
+    }
+
+
 def load_profile() -> dict:
     """Load user profile from ~/.applypilot/profile.json."""
     import json

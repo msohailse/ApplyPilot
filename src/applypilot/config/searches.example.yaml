@@ -32,6 +32,16 @@ locations:
     remote: true
     job_type: "parttime"
     country_indeed: "norway"
+  - label: "Tromso Local"
+    location: "Tromsø, Norway"
+    remote: false
+    job_type: "fulltime"
+    country_indeed: "norway"
+  - label: "Norway Full-Time"
+    location: "Norway"
+    remote: false
+    job_type: "fulltime"
+    country_indeed: "norway"
   - label: "Sweden Part-Time Remote"
     location: "Sweden"
     remote: true
@@ -88,27 +98,16 @@ locations:
     job_type: "parttime"
     country_indeed: "italy"
 
-# Remote jobs are always retained. These patterns only permit non-remote jobs
-# in the European fallback regions.
+# On-site (non-remote) jobs are accepted everywhere EXCEPT the US.
+# US roles are kept only when remote (see remote_only_countries below).
+# "*" = accept every non-remote location; country rules handle the rest.
 location_accept:
-  - "norway"
-  - "norge"
-  - "sweden"
-  - "denmark"
-  - "finland"
-  - "germany"
-  - "netherlands"
-  - "ireland"
-  - "united kingdom"
-  - "uk"
-  - "france"
-  - "spain"
-  - "portugal"
-  - "italy"
-  - "italia"
-  - "europe"
-  - "emea"
+  - "*"
 location_reject_non_remote: []
+
+# Jobs in these countries are dropped unless the role is remote.
+remote_only_countries:
+  - "United States"
 
 queries:
   - query: "Backend Engineer"
@@ -123,6 +122,21 @@ queries:
   - query: "Python Developer"
     tier: 1
     location_labels: ["US Remote", "Canada Remote"]
+  - query: "Software Engineer"
+    tier: 1
+    location_labels: ["Tromso Local", "Norway Full-Time"]
+  - query: "Full Stack Developer"
+    tier: 1
+    location_labels: ["Tromso Local", "Norway Full-Time"]
+  - query: "Backend Developer"
+    tier: 1
+    location_labels: ["Tromso Local", "Norway Full-Time"]
+  - query: "DevOps Engineer"
+    tier: 1
+    location_labels: ["Tromso Local", "Norway Full-Time"]
+  - query: "Data Engineer"
+    tier: 1
+    location_labels: ["Tromso Local", "Norway Full-Time"]
   - query: "Part Time Backend Engineer"
     tier: 2
     location_labels: &europe_part_time_locations

@@ -24,7 +24,9 @@ from playwright.sync_api import sync_playwright
 
 from applypilot import config
 from applypilot.config import DB_PATH
-from applypilot.database import get_connection, init_db, ensure_columns
+from applypilot.database import (
+    delete_job_if_unused, ensure_columns, get_connection, init_db,
+)
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
@@ -100,7 +102,8 @@ def resolve_all_urls(conn: sqlite3.Connection) -> dict:
                 conn.execute("UPDATE jobs SET url = ? WHERE url = ?", (new_url, url))
                 resolved += 1
             except sqlite3.IntegrityError:
-                conn.execute("DELETE FROM jobs WHERE url = ?", (url,))
+                # Target URL already exists. Never drop a row the user has data on.
+                delete_job_if_unused(url, conn)
                 resolved += 1
         else:
             failed += 1
@@ -183,7 +186,7 @@ def resolve_wttj_urls(conn: sqlite3.Connection) -> int:
                 )
                 updated += 1
             except sqlite3.IntegrityError:
-                conn.execute("DELETE FROM jobs WHERE url = ?", (old_url,))
+                delete_job_if_unused(old_url, conn)
                 updated += 1
         else:
             for s, data in slug_map.items():
@@ -195,7 +198,7 @@ def resolve_wttj_urls(conn: sqlite3.Connection) -> int:
                         )
                         updated += 1
                     except sqlite3.IntegrityError:
-                        conn.execute("DELETE FROM jobs WHERE url = ?", (old_url,))
+                        delete_job_if_unused(old_url, conn)
                         updated += 1
                     break
 

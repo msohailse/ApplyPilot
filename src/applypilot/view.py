@@ -19,7 +19,9 @@ from urllib.parse import quote, urlparse, parse_qs
 from rich.console import Console
 
 from applypilot.config import APP_DIR, DB_PATH, TAILORED_DIR, COVER_LETTER_DIR
-from applypilot.database import ensure_columns, get_connection, get_study_jobs
+from applypilot.database import (
+    ensure_columns, get_connection, get_inbox_summaries, get_study_jobs,
+)
 from applypilot.enrichment.classify import backfill_classifications, backfill_company_from_site
 from applypilot.todos import load_todos
 from applypilot.answers import load_answers
@@ -128,6 +130,9 @@ def render_dashboard_html() -> str:
     # Combine Resume fields) so the query below never fails on an older DB.
     ensure_columns(conn)
 
+    # Cached Gmail inbox insights (job_url -> summary), rendered on applied jobs.
+    inbox_summaries = get_inbox_summaries(conn)
+
     # Regex-only safety backfill (never calls the LLM). Country/language are
     # decided during the pipeline (discovery + scoring) and via `applypilot classify`.
     backfill_classifications(conn)
@@ -175,7 +180,8 @@ def render_dashboard_html() -> str:
                full_description, application_url, detail_error,
                fit_score, score_reasoning, apply_status,
                language_requirement, employment_type, country, work_mode,
-               tailored_resume_path, combined_tex_path, cover_letter_path, notes, apply_error, company, study_note
+               tailored_resume_path, combined_tex_path, cover_letter_path, notes, apply_error, company, study_note,
+               focused, stale, highlighted, highlight_concepts
         FROM jobs
         ORDER BY fit_score DESC NULLS LAST, site, title
     """).fetchall()
@@ -288,6 +294,51 @@ def render_dashboard_html() -> str:
         company_display = escape(j["company"] or "")
         study_display = escape(j["study_note"] or "")
         study_marked = " in-study" if (j["study_note"] or "").strip() else ""
+        focused_flag = int(j["focused"] or 0)
+        focused_cls = " focused" if focused_flag else ""
+        focus_btn_label = "Unfocus" if focused_flag else "Focus"
+        focus_btn = (
+            f'<button class="mark-btn focus{" active" if focused_flag else ""}" '
+            f'onclick="toggleFocus(this)">{focus_btn_label}</button>'
+        )
+        highlight_flag = int(j["highlighted"] or 0)
+        highlight_cls = " highlighted" if highlight_flag else ""
+        highlight_btn_label = "Remove Highlight" if highlight_flag else "Generate Highlight"
+        highlight_btn = (
+            f'<button class="mark-btn highlight{" active" if highlight_flag else ""}" '
+            f'onclick="toggleHighlight(this)">{highlight_btn_label}</button>'
+        )
+        import json as _json
+        try:
+            _concepts = _json.loads(j["highlight_concepts"] or "[]")
+        except (ValueError, TypeError):
+            _concepts = []
+        concepts_html = ""
+        if _concepts:
+            chips = "".join(
+                f'<span class="concept-chip">{escape(str(c))}</span>' for c in _concepts
+            )
+            concepts_html = (
+                f'<div class="highlight-row"><span class="highlight-label">Key concepts:'
+                f'</span>{chips}</div>'
+            )
+        stale_flag = int(j["stale"] or 0)
+        stale_cls = " stale" if stale_flag else ""
+        stale_btn = (
+            f'<button class="stale-x" title="'
+            f'{"Restore from Stale" if stale_flag else "Move to Stale"}" '
+            f'onclick="toggleStale(this)">{"↩" if stale_flag else "×"}</button>'
+        )
+        # Post-application outcome buttons. Always rendered; shown via the
+        # card's "is-applied" class (so they appear right after marking Applied).
+        outcome_btns = (
+            '<button class="mark-btn interview" onclick="markJob(this,\'interviewing\')">Interviewing</button>'
+            '<button class="mark-btn reject" onclick="markJob(this,\'rejected\')">Rejected</button>'
+            '<button class="mark-btn nodeal" onclick="markJob(this,\'no_deal\')">No deal</button>'
+        )
+        applied_cls = " is-applied" if (j["apply_status"] or "") in (
+            "applied", "success", "interviewing", "offer", "rejected", "no_deal"
+        ) else ""
 
         # Share links (email + WhatsApp) with a pre-filled message.
         share_title_raw = (j["title"] or "Job").strip()
@@ -346,6 +397,10 @@ def render_dashboard_html() -> str:
         status_label = {
             "applied": ("Applied", "#10b981"),
             "success": ("Applied", "#10b981"),
+            "interviewing": ("Interviewing", "#3b82f6"),
+            "offer": ("Offer", "#22c55e"),
+            "rejected": ("Rejected", "#ef4444"),
+            "no_deal": ("No deal", "#64748b"),
             "failed": ("Failed", "#ef4444"),
             "not_available": ("Not Available", "#94a3b8"),
             "not_interested": ("Not Interested", "#64748b"),
@@ -369,50 +424,72 @@ def render_dashboard_html() -> str:
         resume_txt = j["tailored_resume_path"] or ""
         combined_tex = j["combined_tex_path"] or ""
         cover_txt = j["cover_letter_path"] or ""
-        file_links = []
+        file_items = []
+
+        def _add_file(kind: str, label: str, path: "Path | None") -> None:
+            if not path or not path.exists():
+                return
+            file_items.append(
+                f'<span class="file-item">'
+                f'<a class="file-link" href="/job-file?url={job_url_q}&kind={kind}" target="_blank">{label}</a>'
+                f'<button class="file-x" title="Delete {label} permanently" '
+                f'onclick="deleteJobFile(this, \'{kind}\', \'{label}\')">×</button>'
+                f'</span>'
+            )
+
         if resume_txt:
-            if Path(resume_txt).with_suffix(".pdf").exists():
-                file_links.append(
-                    f'<a class="file-link" href="/job-file?url={job_url_q}&kind=resume_pdf" target="_blank">Resume PDF</a>'
-                )
-            if combined_tex and Path(combined_tex).exists():
-                file_links.append(
-                    f'<a class="file-link" href="/job-file?url={job_url_q}&kind=resume_tex" target="_blank">Resume TEX</a>'
-                )
-            if os.path.exists(resume_txt):
-                file_links.append(
-                    f'<a class="file-link" href="/job-file?url={job_url_q}&kind=resume_txt" target="_blank">Resume TXT</a>'
-                )
+            _add_file("resume_pdf", "Resume PDF", Path(resume_txt).with_suffix(".pdf"))
+            _add_file("resume_txt", "Resume TXT", Path(resume_txt))
+        if combined_tex:
+            _add_file("resume_tex", "Resume TEX", Path(combined_tex))
         if cover_txt:
-            if Path(cover_txt).with_suffix(".pdf").exists():
-                file_links.append(
-                    f'<a class="file-link" href="/job-file?url={job_url_q}&kind=cover_pdf" target="_blank">Cover PDF</a>'
-                )
-            if os.path.exists(cover_txt):
-                file_links.append(
-                    f'<a class="file-link" href="/job-file?url={job_url_q}&kind=cover_txt" target="_blank">Cover TXT</a>'
-                )
+            _add_file("cover_pdf", "Cover PDF", Path(cover_txt).with_suffix(".pdf"))
+            _add_file("cover_txt", "Cover TXT", Path(cover_txt))
         files_html = (
-            f'<div class="files-row"><span class="files-label">Files:</span>{"".join(file_links)}</div>'
-            if file_links else ""
+            f'<div class="files-row"><span class="files-label">Files:</span>{"".join(file_items)}</div>'
+            if file_items else ""
         )
 
-        # Combine Resume: tailor this job on demand (only if it has no tailored
+        # Generate Resume: tailor this job on demand (only if it has no tailored
         # text yet) and render the result into the base LaTeX resume.
         combine_html = ""
         if j["full_description"]:
             combine_html += (
                 '<button class="mark-btn combine" onclick="combineResume(this)" '
-                'title="Tailor this job (if needed) and render into your LaTeX resume">Combine Resume</button>'
+                'title="Tailor this job (if needed) and render into your LaTeX resume">Generate Resume</button>'
             )
-        if combined_tex:
+        # Generate Cover Letter: on demand, using COVER_LETTER_PROMPT from .env.
+        if j["full_description"]:
             combine_html += (
-                '<button class="mark-btn combine-del" onclick="deleteCombined(this)" '
-                'title="Delete the combined .tex and .pdf">Delete Resume</button>'
+                '<button class="mark-btn cover-generate" onclick="generateCoverLetter(this)" '
+                'title="Generate a cover letter for this job">Generate Cover Letter</button>'
             )
 
+        # Inbox insights: only on applied jobs (or when already cached). Cached,
+        # never regenerated until the user hits "Free".
+        inbox_html = ""
+        inbox_cached = inbox_summaries.get(j["url"])
+        if inbox_cached is not None or st in ("applied", "success"):
+            if inbox_cached is not None:
+                inbox_html = (
+                    '<div class="inbox-panel">'
+                    '<div class="inbox-head">'
+                    '<span class="inbox-title">Inbox insights</span>'
+                    '<button class="mark-btn inbox-scan" onclick="scanInbox(this)">Refresh</button>'
+                    '<button class="mark-btn combine-del" onclick="freeInbox(this)">Free</button>'
+                    '</div>'
+                    f'<pre class="inbox-body">{escape(inbox_cached)}</pre>'
+                    '</div>'
+                )
+            else:
+                inbox_html = (
+                    '<div class="inbox-panel">'
+                    '<button class="mark-btn inbox-scan" onclick="scanInbox(this)">'
+                    'Inbox Insights</button></div>'
+                )
+
         job_sections += f"""
-        <div class="job-card" data-score="{score}" data-url="{escape(j['url'] or '')}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}" data-apply-status="{escape(j['apply_status'] or '')}" data-language="{('none' if not j['language_requirement'] else (j['language_requirement'] or '').lower())}" data-employment-type="{(j['employment_type'] or '').lower()}" data-country="{(j['country'] or '').lower()}" data-work-mode="{(j['work_mode'] or '').lower()}" data-company="{(j['company'] or '').lower()}">
+        <div class="job-card{focused_cls}{stale_cls}{applied_cls}{highlight_cls}" data-focused="{focused_flag}" data-highlighted="{highlight_flag}" data-stale="{stale_flag}" data-score="{score}" data-url="{escape(j['url'] or '')}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}" data-apply-status="{escape(j['apply_status'] or '')}" data-language="{('none' if not j['language_requirement'] else (j['language_requirement'] or '').lower())}" data-employment-type="{(j['employment_type'] or '').lower()}" data-country="{(j['country'] or '').lower()}" data-work-mode="{(j['work_mode'] or '').lower()}" data-company="{(j['company'] or '').lower()}">
           <div class="card-header">
             <span class="score-pill" style="background:{'#64748b' if score == 0 else ('#10b981' if score >= 7 else ('#f59e0b' if score >= 5 else '#ef4444'))}">{'–' if score == 0 else score}</span>
             <div class="title-block">
@@ -420,19 +497,25 @@ def render_dashboard_html() -> str:
               {f'<div class="company-line">{company_display}</div>' if company_display else ''}
             </div>
             {status_badge}
+            {highlight_btn}
+            {focus_btn}
+            {stale_btn}
           </div>
           <div class="meta-row">{meta_html}</div>
           {f'<div class="keywords-row">{escape(keywords)}</div>' if keywords else ''}
+          {concepts_html}
           {f'<div class="reasoning-row">{escape(reasoning)}</div>' if reasoning else ''}
           <p class="desc-preview">{desc_preview}...</p>
           {"<details class='full-desc-details'><summary class='expand-btn'>Full Description (" + f'{desc_len:,}' + " chars)</summary><div class='full-desc'>" + full_desc_html + "</div></details>" if j["full_description"] else ""}
           {files_html}
+          {inbox_html}
           <div class="mark-row">
             <button class="mark-btn view" onclick="openJobModal(this)">View</button>
             <button class="mark-btn pass" onclick="markJob(this,'applied')">Applied</button>
             <button class="mark-btn fail" onclick="markJob(this,'failed')">Failed</button>
             <button class="mark-btn na" onclick="markJob(this,'not_available')">Not Available</button>
             <button class="mark-btn ni" onclick="markJob(this,'not_interested')">Not Interested</button>
+            <span class="outcome-btns">{outcome_btns}</span>
             {combine_html}
           </div>
           <div class="lang-flag">{lang_flag_html}</div>
@@ -441,7 +524,11 @@ def render_dashboard_html() -> str:
           </div>
           <details class="study-details{study_marked}">
             <summary class="study-summary">Personal Note for Study{(' ✓' if study_marked else '')}</summary>
-            <textarea class="study-input" placeholder="Why study this role? skills to learn, gaps, notes..." onchange="saveStudy(this)">{study_display}</textarea>
+            <textarea class="study-input" placeholder="e.g. TypeScript, AWS (Serverless, SQS, SNS etc) is a nice-to-have - skills to learn, gaps, notes..." onchange="saveStudy(this)">{study_display}</textarea>
+            <div class="study-actions">
+              <button class="mark-btn study-save" onclick="saveStudy(this.closest('.study-details').querySelector('.study-input'), this)">Save</button>
+              <span class="study-hint"></span>
+            </div>
           </details>
           <div class="card-footer">{apply_html}</div>
           <div class="share-row">
@@ -482,6 +569,72 @@ def render_dashboard_html() -> str:
     todos_html = _render_todos_html()
     study_html = _render_study_html()
     answers_html = _render_answers_html()
+
+    # Pipeline outcome stats for the Stats tab (computed from the DB).
+    try:
+        sc = dict(
+            get_connection().execute(
+                "SELECT COALESCE(apply_status, 'not_applied'), COUNT(*) "
+                "FROM jobs GROUP BY 1"
+            ).fetchall()
+        )
+        _stale_count = get_connection().execute(
+            "SELECT COUNT(*) FROM jobs WHERE stale = 1"
+        ).fetchone()[0]
+        _by_date = get_connection().execute(
+            "SELECT date(applied_at) AS d, COUNT(*) FROM jobs "
+            "WHERE applied_at IS NOT NULL AND applied_at != '' "
+            "GROUP BY d ORDER BY d DESC LIMIT 90"
+        ).fetchall()
+    except Exception:
+        sc, _stale_count, _by_date = {}, 0, []
+
+    def _n(*keys):
+        return sum(int(sc.get(k, 0) or 0) for k in keys)
+
+    def _rate(n, d):
+        return f"{(100.0 * n / d):.0f}%" if d else "–"
+
+    _applied_total = _n("applied", "success", "interviewing", "offer", "rejected", "no_deal")
+    _state_rows = [
+        ("Applied (total)", _applied_total, "100%" if _applied_total else "–"),
+        ("Interviewing", _n("interviewing"), _rate(_n("interviewing"), _applied_total)),
+        ("Offers", _n("offer"), _rate(_n("offer"), _applied_total)),
+        ("Rejected", _n("rejected"), _rate(_n("rejected"), _applied_total)),
+        ("No deal", _n("no_deal"), _rate(_n("no_deal"), _applied_total)),
+        ("Failed", _n("failed"), "–"),
+        ("Not available", _n("not_available"), "–"),
+        ("Not interested", _n("not_interested"), "–"),
+        ("Expired", _n("expired"), "–"),
+        ("Not applied", _n("not_applied"), "–"),
+        ("Stale", int(_stale_count or 0), "–"),
+    ]
+    stats_rows_html = "".join(
+        f'<tr><td>{escape(str(label))}</td>'
+        f'<td class="num">{count}</td><td class="num">{rate}</td></tr>'
+        for label, count, rate in _state_rows
+    )
+    date_rows_html = "".join(
+        f'<tr><td>{escape(str(d))}</td><td class="num">{c}</td></tr>'
+        for d, c in _by_date
+    ) or '<tr><td colspan="2" class="muted">No applications yet</td></tr>'
+    stats_html = f"""
+<div class="stats-panel">
+  <h2>Pipeline &amp; success ratio</h2>
+  <div class="stats-grid">
+    <table class="stats-table">
+      <thead><tr><th>Stage</th><th class="num">Jobs</th>
+        <th class="num">Rate (of applied)</th></tr></thead>
+      <tbody>{stats_rows_html}</tbody>
+    </table>
+    <table class="stats-table">
+      <thead><tr><th>Date applied</th><th class="num">Jobs</th></tr></thead>
+      <tbody>{date_rows_html}</tbody>
+    </table>
+  </div>
+  <p class="subtitle">Stale jobs are kept here and in exports so success-rate
+    stays accurate.</p>
+</div>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -540,6 +693,10 @@ def render_dashboard_html() -> str:
   .study-summary {{ font-size: 0.78rem; color: #94a3b8; cursor: pointer; }}
   .study-details.in-study > summary {{ color: #f59e0b; }}
   .study-input {{ width: 100%; min-height: 60px; margin-top: 0.4rem; background: #0f172a; border: 1px solid #334155; color: #e2e8f0; padding: 0.4rem 0.6rem; border-radius: 6px; font-size: 0.78rem; font-family: inherit; resize: vertical; }}
+  .study-actions {{ display: flex; align-items: center; gap: 0.5rem; margin-top: 0.35rem; }}
+  .study-hint {{ font-size: 0.72rem; color: #10b981; }}
+  .mark-btn.study-save {{ background: #1e3a5f; border-color: #2a7ab5; color: #93c5fd; }}
+  .mark-btn.study-save:hover {{ background: #2a7ab5; border-color: #2a7ab5; color: #fff; }}
 
   /* Job note input */
   .job-note {{ margin: 0.4rem 0 0.2rem; }}
@@ -659,6 +816,13 @@ def render_dashboard_html() -> str:
   .files-label {{ font-size: 0.72rem; color: #94a3b8; }}
   .file-link {{ background: #1e3a5f; border: 1px solid #60a5fa55; color: #93c5fd; text-decoration: none; padding: 0.2rem 0.55rem; border-radius: 6px; font-size: 0.72rem; font-weight: 500; }}
   .file-link:hover {{ background: #60a5fa22; color: #bfdbfe; }}
+  .file-item {{ display: inline-flex; align-items: stretch; overflow: hidden;
+    background: #1e3a5f; border: 1px solid #60a5fa55; border-radius: 6px; }}
+  .file-item .file-link {{ border: none; border-radius: 0; background: transparent; }}
+  .file-x {{ background: #3f1d1d; border: none; border-left: 1px solid #7f1d1d;
+    color: #fca5a5; font-size: 0.85rem; font-weight: 700; line-height: 1;
+    cursor: pointer; padding: 0 5px; }}
+  .file-x:hover {{ background: #b91c1c; color: #fff; }}
   .mark-row {{ display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0.6rem 0; padding-top: 0.6rem; border-top: 1px solid #334155; }}
   .mark-btn {{ background: #334155; border: 1px solid #475569; color: #cbd5e1; padding: 0.25rem 0.6rem; border-radius: 6px; cursor: pointer; font-size: 0.72rem; transition: all 0.15s; }}
   .mark-btn:hover {{ background: #475569; color: #fff; }}
@@ -670,6 +834,66 @@ def render_dashboard_html() -> str:
   .mark-btn.combine:hover {{ background: #2a7ab5; border-color: #2a7ab5; color: #fff; }}
   .mark-btn.combine-del {{ background: #3f1d1d; border-color: #7f1d1d; color: #fca5a5; }}
   .mark-btn.combine-del:hover {{ background: #b91c1c; border-color: #b91c1c; color: #fff; }}
+  .mark-btn.cover-generate {{ background: #1f3a2e; border-color: #2f7d5b; color: #86efac; }}
+  .mark-btn.cover-generate:hover {{ background: #2f7d5b; border-color: #2f7d5b; color: #fff; }}
+  .mark-btn.focus.active {{ background: #f59e0b; border-color: #f59e0b; color: #0f172a; font-weight: bold; }}
+  .job-card.focused {{ border: 2px solid #f59e0b; box-shadow: 0 0 14px rgba(245,158,11,0.35); }}
+  .job-card.focused .job-title {{ font-weight: 800; }}
+  .mark-btn.focus {{ margin-left: auto; }}
+
+  /* Highlight (LLM key concepts) */
+  .mark-btn.highlight {{ background: #134e4a; border-color: #0f766e; color: #5eead4; }}
+  .mark-btn.highlight:hover {{ background: #0f766e; border-color: #0f766e; color: #fff; }}
+  .mark-btn.highlight.active {{ background: #14b8a6; border-color: #14b8a6; color: #0f172a; font-weight: bold; }}
+  .job-card.highlighted {{ border: 2px solid #14b8a6; box-shadow: 0 0 12px rgba(20,184,166,0.35); }}
+  .job-card.highlighted .job-title {{ font-weight: 800; }}
+  .highlight-row {{ display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem; margin: 0.35rem 0; }}
+  .highlight-label {{ font-size: 0.7rem; color: #5eead4; font-weight: 600; }}
+  .concept-chip {{ font-size: 0.7rem; padding: 0.12rem 0.5rem; border-radius: 999px;
+    background: #134e4a; color: #5eead4; border: 1px solid #0f766e; }}
+  .inbox-panel {{ margin: 6px 0; padding: 8px 10px; border-radius: 8px; background: #0f1b2e; border: 1px solid #1e3a5f; }}
+  .inbox-head {{ display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }}
+  .inbox-title {{ font-size: 0.78rem; font-weight: 600; color: #93c5fd; }}
+  .inbox-body {{ white-space: pre-wrap; font-family: inherit; font-size: 0.8rem; color: #cbd5e1; margin: 0; }}
+  .mark-btn.inbox-scan {{ background: #1e3a5f; border-color: #2a7ab5; color: #93c5fd; }}
+  .mark-btn.inbox-scan:hover {{ background: #2a7ab5; border-color: #2a7ab5; color: #fff; }}
+  .focus-filter-btn.active {{ background: #f59e0b; border-color: #f59e0b; color: #0f172a; font-weight: bold; }}
+
+  /* Post-application outcome buttons (hidden until the job is applied) */
+  .outcome-btns {{ display: none; gap: 0.3rem; }}
+  .job-card.is-applied .outcome-btns {{ display: inline-flex; }}
+  .mark-btn.interview {{ background: #1e3a5f; border-color: #2a5fa5; color: #93c5fd; }}
+  .mark-btn.interview:hover {{ background: #2a5fa5; border-color: #2a5fa5; color: #fff; }}
+  .mark-btn.reject {{ background: #3f1d1d; border-color: #7f1d1d; color: #fca5a5; }}
+  .mark-btn.reject:hover {{ background: #b91c1c; border-color: #b91c1c; color: #fff; }}
+  .mark-btn.nodeal {{ background: #334155; border-color: #475569; color: #cbd5e1; }}
+  .mark-btn.nodeal:hover {{ background: #475569; border-color: #475569; color: #fff; }}
+
+  /* Manual stale (×) button + stale cards */
+  .stale-x {{ margin-left: 6px; background: transparent; border: none; color: #64748b;
+    font-size: 1.15rem; line-height: 1; cursor: pointer; padding: 0 2px; }}
+  .stale-x:hover {{ color: #ef4444; }}
+  .job-card.stale {{ opacity: 0.62; border-left-color: #64748b !important; }}
+
+  /* Tabs */
+  .tabs {{ display: flex; gap: 0.5rem; margin: 1.25rem 0 0.5rem; }}
+  .tab-btn {{ background: #1e293b; border: 1px solid #334155; color: #cbd5e1;
+    padding: 0.45rem 1.1rem; border-radius: 8px; cursor: pointer; font-size: 0.85rem; }}
+  .tab-btn:hover {{ border-color: #2a7ab5; color: #fff; }}
+  .tab-btn.active {{ background: #2a7ab5; border-color: #2a7ab5; color: #fff; font-weight: 600; }}
+
+  /* Stats tab */
+  .stats-panel {{ margin-top: 1rem; }}
+  .stats-panel h2 {{ font-size: 1.1rem; margin-bottom: 0.75rem; }}
+  .stats-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }}
+  @media (max-width: 760px) {{ .stats-grid {{ grid-template-columns: 1fr; }} }}
+  .stats-table {{ width: 100%; border-collapse: collapse; background: #1e293b;
+    border-radius: 10px; overflow: hidden; }}
+  .stats-table th, .stats-table td {{ text-align: left; padding: 0.5rem 0.85rem;
+    border-bottom: 1px solid #0f172a; font-size: 0.85rem; }}
+  .stats-table th {{ color: #94a3b8; font-weight: 600; }}
+  .stats-table td.num, .stats-table th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+  .stats-table .muted {{ color: #64748b; }}
   .lang-flag {{ margin: 0.5rem 0 0.1rem; }}
   .lang-flag-tag {{ font-size: 0.72rem; padding: 0.2rem 0.55rem; border-radius: 6px; font-weight: 600; display: inline-block; }}
   .lang-flag-tag.req {{ background: #7c2d12; color: #fdba74; }}
@@ -711,8 +935,15 @@ def render_dashboard_html() -> str:
   <div class="stat-card stat-high"><div class="stat-num">{high_fit}</div><div class="stat-label">Strong Fit (7+)</div></div>
 </div>
 
+<div class="tabs">
+  <button class="tab-btn active" data-tab="jobs" onclick="showTab('jobs', event)">Jobs</button>
+  <button class="tab-btn" data-tab="stats" onclick="showTab('stats', event)">Stats</button>
+</div>
+
+<div id="tab-jobs">
 <div class="filters">
-  <span class="filter-label">Score:</span>
+  <button class="filter-btn focus-filter-btn" onclick="filterFocused(event)" title="Show only focused jobs">★ Focus only</button>
+  <span class="filter-label" style="margin-left:1rem">Score:</span>
   <button class="filter-btn score-btn active" onclick="filterScore(-1)">All</button>
   <button class="filter-btn score-btn" onclick="filterScore(5)">5+</button>
   <button class="filter-btn score-btn" onclick="filterScore(7)">7+ Strong</button>
@@ -722,10 +953,14 @@ def render_dashboard_html() -> str:
   <span class="filter-label" style="margin-left:1rem">Status:</span>
   <button class="filter-btn status-btn active" onclick="filterStatus('not_applied', event)">Not Applied</button>
   <button class="filter-btn status-btn" onclick="filterStatus('applied', event)">Applied</button>
+  <button class="filter-btn status-btn" onclick="filterStatus('interviewing', event)">Interviewing</button>
+  <button class="filter-btn status-btn" onclick="filterStatus('rejected', event)">Rejected</button>
+  <button class="filter-btn status-btn" onclick="filterStatus('no_deal', event)">No deal</button>
   <button class="filter-btn status-btn" onclick="filterStatus('failed', event)">Failed</button>
   <button class="filter-btn status-btn" onclick="filterStatus('not_available', event)">Not Available</button>
   <button class="filter-btn status-btn" onclick="filterStatus('not_interested', event)">Not Interested</button>
   <button class="filter-btn status-btn" onclick="filterStatus('expired', event)">Expired</button>
+  <button class="filter-btn status-btn" onclick="filterStatus('stale', event)">Stale</button>
   <button class="filter-btn status-btn" onclick="filterStatus('all', event)">All</button>
   
   <span class="filter-label" style="margin-left:1rem">Language:</span>
@@ -747,7 +982,7 @@ def render_dashboard_html() -> str:
   <button class="filter-btn" onclick="resetCompany()">Reset</button>
   
   <span class="filter-label" style="margin-left:1rem">Search:</span>
-  <input type="text" class="search-input" placeholder="Filter by title, site..." oninput="filterText(this.value)">
+  <input type="text" id="search-input" class="search-input" placeholder="Filter by title, site..." oninput="filterText(this.value)">
   <button class="filter-btn" style="margin-left:1rem" onclick="resetAllFilters()">Reset all filters</button>
 </div>
 
@@ -765,6 +1000,11 @@ def render_dashboard_html() -> str:
 <div id="job-count" class="job-count"></div>
 
 {job_sections}
+</div>
+
+<div id="tab-stats" style="display:none">
+{stats_html}
+</div>
 
 {answers_html}
 
@@ -804,6 +1044,52 @@ let typeFilter = 'any';
 let countryFilter = 'any';
 let workModeFilter = 'any';
 let companyFilter = '';
+let focusFilter = false;
+
+// Persist the active filter set (and tab) so a reload -- e.g. right after
+// generating a document -- keeps you exactly where you were.
+const FILTER_KEY = 'applypilot.filters.v1';
+const TAB_KEY = 'applypilot.tab.v1';
+
+function saveFilters() {{
+  try {{
+    localStorage.setItem(FILTER_KEY, JSON.stringify({{
+      minScore, searchText, statusFilter, langFilter, typeFilter,
+      countryFilter, workModeFilter, companyFilter, focusFilter,
+    }}));
+  }} catch (e) {{}}
+}}
+
+function restoreFilters() {{
+  let s = null;
+  try {{ s = JSON.parse(localStorage.getItem(FILTER_KEY) || 'null'); }} catch (e) {{}}
+  if (!s) return;
+  if (typeof s.minScore === 'number') minScore = s.minScore;
+  if (typeof s.searchText === 'string') searchText = s.searchText;
+  if (typeof s.statusFilter === 'string') statusFilter = s.statusFilter;
+  if (typeof s.langFilter === 'string') langFilter = s.langFilter;
+  if (typeof s.typeFilter === 'string') typeFilter = s.typeFilter;
+  if (typeof s.countryFilter === 'string') countryFilter = s.countryFilter;
+  if (typeof s.workModeFilter === 'string') workModeFilter = s.workModeFilter;
+  if (typeof s.companyFilter === 'string') companyFilter = s.companyFilter;
+  focusFilter = !!s.focusFilter;
+}}
+
+function restoreFilterUI() {{
+  document.querySelectorAll('.score-btn').forEach(b =>
+    b.classList.toggle('active', (b.getAttribute('onclick') || '').includes('filterScore(' + minScore + ')')));
+  document.querySelectorAll('.status-btn').forEach(b =>
+    b.classList.toggle('active', (b.getAttribute('onclick') || '').includes("filterStatus('" + statusFilter + "'")));
+  document.querySelectorAll('.type-btn').forEach(b =>
+    b.classList.toggle('active', (b.getAttribute('onclick') || '').includes("filterType('" + typeFilter + "'")));
+  document.querySelectorAll('.mode-btn').forEach(b =>
+    b.classList.toggle('active', (b.getAttribute('onclick') || '').includes("filterWorkMode('" + workModeFilter + "'")));
+  document.querySelectorAll('.focus-filter-btn').forEach(b => b.classList.toggle('active', focusFilter));
+  const ls = document.getElementById('lang-select'); if (ls) ls.value = langFilter;
+  const cs = document.getElementById('country-select'); if (cs) cs.value = countryFilter;
+  const si = document.getElementById('search-input'); if (si) si.value = searchText;
+  const comp = document.getElementById('company-search'); if (comp) comp.value = companyFilter;
+}}
 
 function filterScore(min) {{
   minScore = min;
@@ -824,9 +1110,19 @@ function filterStatus(val, event) {{
   applyFilters();
 }}
 
+function filterFocused(event) {{
+  focusFilter = !focusFilter;
+  if (event && event.target) event.target.classList.toggle('active', focusFilter);
+  applyFilters();
+}}
+
 const STATUS_BADGES = {{
   applied: ['Applied', '#10b981'],
   success: ['Applied', '#10b981'],
+  interviewing: ['Interviewing', '#3b82f6'],
+  offer: ['Offer', '#22c55e'],
+  rejected: ['Rejected', '#ef4444'],
+  no_deal: ['No deal', '#64748b'],
   failed: ['Failed', '#ef4444'],
   not_available: ['Not Available', '#94a3b8'],
   not_interested: ['Not Interested', '#64748b'],
@@ -858,6 +1154,7 @@ async function postMark(card, status, reason) {{
     if (data.ok) {{
       const newStatus = (status === 'reset' ? '' : status);
       card.dataset.applyStatus = newStatus;
+      card.classList.toggle('is-applied', ['applied', 'success', 'interviewing', 'offer', 'rejected', 'no_deal'].includes(newStatus));
       setStatusBadge(card, newStatus);
       const badge = card.querySelector('.status-badge');
       if (badge) badge.title = reason || '';
@@ -893,18 +1190,18 @@ async function combineResume(btn) {{
   if (!card) return;
   const url = card.dataset.url;
   if (!url) return;
-  const extra = window.prompt('Optional instructions to guide the combine (blank = none):', '') || '';
+  const extra = window.prompt('Optional instructions to guide the resume generation (blank = none):', '') || '';
   const original = btn.textContent;
   btn.disabled = true;
-  btn.textContent = 'Combining...';
+  btn.textContent = 'Generating...';
   try {{
     const data = await postJSON('/combine', {{url: url, extra: extra}});
     if (data.ok) {{
       if (data.fallback) alert('No LaTeX base found - used the default PDF pipeline.');
-      btn.textContent = 'Combined';
+      btn.textContent = 'Generated';
       setTimeout(() => {{ location.reload(); }}, 600);
     }} else {{
-      alert('Combine failed: ' + (data.error || 'unknown'));
+      alert('Generate failed: ' + (data.error || 'unknown'));
       btn.disabled = false;
       btn.textContent = original;
     }}
@@ -920,7 +1217,7 @@ async function deleteCombined(btn) {{
   if (!card) return;
   const url = card.dataset.url;
   if (!url) return;
-  if (!window.confirm('Delete the combined resume (.tex and .pdf) for this job?')) return;
+  if (!window.confirm('Delete the generated resume (.tex and .pdf) for this job?')) return;
   const original = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'Deleting...';
@@ -938,6 +1235,198 @@ async function deleteCombined(btn) {{
     btn.disabled = false;
     btn.textContent = original;
   }}
+}}
+
+async function generateCoverLetter(btn) {{
+  const card = btn.closest('.job-card');
+  if (!card) return;
+  const url = card.dataset.url;
+  if (!url) return;
+  const extra = window.prompt('Optional instructions to guide this cover letter (blank = none):', '') || '';
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Generating...';
+  try {{
+    const data = await postJSON('/cover', {{url: url, extra: extra}});
+    if (data.ok) {{
+      btn.textContent = 'Generated';
+      setTimeout(() => {{ location.reload(); }}, 600);
+    }} else {{
+      alert('Cover letter failed: ' + (data.error || 'unknown'));
+      btn.disabled = false;
+      btn.textContent = original;
+    }}
+  }} catch (e) {{
+    alert('Could not reach the dashboard server.\\nStart it with: applypilot dashboard');
+    btn.disabled = false;
+    btn.textContent = original;
+  }}
+}}
+
+async function deleteCoverLetter(btn) {{
+  const card = btn.closest('.job-card');
+  if (!card) return;
+  const url = card.dataset.url;
+  if (!url) return;
+  if (!window.confirm('Delete the generated cover letter for this job?')) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Deleting...';
+  try {{
+    const data = await postJSON('/cover/delete', {{url: url}});
+    if (data.ok) {{
+      setTimeout(() => {{ location.reload(); }}, 300);
+    }} else {{
+      alert('Delete failed: ' + (data.error || 'unknown'));
+      btn.disabled = false;
+      btn.textContent = original;
+    }}
+  }} catch (e) {{
+    alert('Could not reach the dashboard server.\\nStart it with: applypilot dashboard');
+    btn.disabled = false;
+    btn.textContent = original;
+  }}
+}}
+
+async function deleteJobFile(btn, kind, label) {{
+  const card = btn.closest('.job-card');
+  if (!card) return;
+  const url = card.dataset.url;
+  if (!url) return;
+  if (!window.confirm('Permanently delete "' + label + '"?\\n\\nThis removes the file from disk and CANNOT be undone.')) return;
+  btn.disabled = true;
+  try {{
+    const data = await postJSON('/file/delete', {{url: url, kind: kind}});
+    if (data.ok) {{
+      setTimeout(() => {{ location.reload(); }}, 200);
+    }} else {{
+      alert('Delete failed: ' + (data.error || 'unknown'));
+      btn.disabled = false;
+    }}
+  }} catch (e) {{
+    alert('Could not reach the dashboard server.\\nStart it with: applypilot dashboard');
+    btn.disabled = false;
+  }}
+}}
+
+async function scanInbox(btn) {{
+  const card = btn.closest('.job-card');
+  if (!card) return;
+  const url = card.dataset.url;
+  if (!url) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Scanning...';
+  try {{
+    const data = await postJSON('/inbox/scan', {{url: url}});
+    if (data.ok) {{
+      setTimeout(() => {{ location.reload(); }}, 400);
+    }} else {{
+      alert('Inbox scan failed: ' + (data.error || 'unknown'));
+      btn.disabled = false;
+      btn.textContent = original;
+    }}
+  }} catch (e) {{
+    alert('Could not reach the dashboard server.\\nStart it with: applypilot dashboard');
+    btn.disabled = false;
+    btn.textContent = original;
+  }}
+}}
+
+async function freeInbox(btn) {{
+  const card = btn.closest('.job-card');
+  if (!card) return;
+  const url = card.dataset.url;
+  if (!url) return;
+  if (!window.confirm('Clear the cached inbox insight for this job?')) return;
+  try {{
+    const data = await postJSON('/inbox/free', {{url: url}});
+    if (data.ok) {{
+      setTimeout(() => {{ location.reload(); }}, 200);
+    }} else {{
+      alert('Failed: ' + (data.error || 'unknown'));
+    }}
+  }} catch (e) {{
+    alert('Could not reach the dashboard server.\\nStart it with: applypilot dashboard');
+  }}
+}}
+
+async function toggleFocus(btn) {{
+  const card = btn.closest('.job-card');
+  if (!card) return;
+  const url = card.dataset.url;
+  if (!url) return;
+  const next = card.dataset.focused === '1' ? 0 : 1;
+  try {{
+    const data = await postJSON('/focus', {{url: url, focused: !!next}});
+    if (data.ok) {{
+      card.dataset.focused = next ? '1' : '0';
+      card.classList.toggle('focused', !!next);
+      btn.classList.toggle('active', !!next);
+      btn.textContent = next ? 'Unfocus' : 'Focus';
+      applyFilters();
+    }}
+  }} catch (e) {{ alert('Could not reach the dashboard server.'); }}
+}}
+
+async function toggleStale(btn) {{
+  const card = btn.closest('.job-card');
+  if (!card) return;
+  const url = card.dataset.url;
+  if (!url) return;
+  const next = card.dataset.stale === '1' ? 0 : 1;
+  if (next && !window.confirm('Move this job to Stale? It stays in your data and exports, but leaves the main list.')) return;
+  btn.disabled = true;
+  try {{
+    const data = await postJSON('/stale', {{url: url, stale: !!next}});
+    if (data.ok) {{
+      card.dataset.stale = next ? '1' : '0';
+      card.classList.toggle('stale', !!next);
+      btn.textContent = next ? '↩' : '×';
+      btn.title = next ? 'Restore from Stale' : 'Move to Stale';
+      applyFilters();
+    }} else {{
+      alert('Failed: ' + (data.error || 'unknown'));
+    }}
+  }} catch (e) {{ alert('Could not reach the dashboard server.'); }}
+  finally {{ btn.disabled = false; }}
+}}
+
+async function toggleHighlight(btn) {{
+  const card = btn.closest('.job-card');
+  if (!card) return;
+  const url = card.dataset.url;
+  if (!url) return;
+  const next = card.dataset.highlighted === '1' ? 0 : 1;
+  const original = btn.textContent;
+  btn.disabled = true;
+  if (next) btn.textContent = 'Analyzing...';
+  try {{
+    const data = await postJSON('/highlight', {{url: url, highlighted: !!next}});
+    if (data.ok) {{
+      if (next && data.concepts && data.concepts.length === 0) {{
+        alert('No concepts extracted (no job description on file).');
+      }}
+      location.reload();
+    }} else {{
+      alert('Highlight failed: ' + (data.error || 'unknown'));
+      btn.disabled = false;
+      btn.textContent = original;
+    }}
+  }} catch (e) {{
+    alert('Could not reach the dashboard server.\\nStart it with: applypilot dashboard');
+    btn.disabled = false;
+    btn.textContent = original;
+  }}
+}}
+
+function showTab(name, event) {{
+  const jobs = document.getElementById('tab-jobs');
+  const stats = document.getElementById('tab-stats');
+  if (jobs) jobs.style.display = (name === 'jobs') ? '' : 'none';
+  if (stats) stats.style.display = (name === 'stats') ? '' : 'none';
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+  try {{ localStorage.setItem(TAB_KEY, name); }} catch (e) {{}}
 }}
 
 let _reasonCard = null;
@@ -1035,20 +1524,26 @@ async function saveNote(input) {{
   }}
 }}
 
-async function saveStudy(input) {{
+async function saveStudy(input, btn) {{
   const card = input.closest('.job-card');
   const url = card ? card.dataset.url : '';
   if (!url) return;
+  const hint = input.closest('.study-details')
+    ? input.closest('.study-details').querySelector('.study-hint') : null;
+  if (btn) {{ btn.disabled = true; btn.textContent = 'Saving...'; }}
   try {{
     const data = await postJSON('/study', {{url: url, note: input.value}});
     if (data.ok) {{
       const det = input.closest('.study-details');
       if (det) det.classList.toggle('in-study', !!(input.value || '').trim());
+      if (hint) {{ hint.textContent = 'Saved'; setTimeout(() => {{ hint.textContent = ''; }}, 1500); }}
     }} else {{
       alert('Failed: ' + (data.error || 'unknown'));
     }}
   }} catch (e) {{
-    alert('Could not reach the dashboard server.');
+    alert('Could not reach the dashboard server.\\nStart it with: applypilot dashboard');
+  }} finally {{
+    if (btn) {{ btn.disabled = false; btn.textContent = 'Save'; }}
   }}
 }}
 
@@ -1155,7 +1650,8 @@ function resetCompany() {{
 
 function resetAllFilters() {{
   minScore = -1; searchText = ''; statusFilter = 'not_applied';
-  langFilter = 'any'; typeFilter = 'any'; countryFilter = 'any'; workModeFilter = 'any'; companyFilter = '';
+  langFilter = 'any'; typeFilter = 'any'; countryFilter = 'any'; workModeFilter = 'any'; companyFilter = ''; focusFilter = false;
+  document.querySelectorAll('.focus-filter-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.score-btn').forEach(b => b.classList.toggle('active', b.textContent.trim() === 'All'));
   document.querySelectorAll('.status-btn').forEach(b => b.classList.toggle('active', b.textContent.trim() === 'Not Applied'));
   document.querySelectorAll('.type-btn').forEach(b => b.classList.toggle('active', b.textContent.trim() === 'Any'));
@@ -1183,12 +1679,19 @@ function applyFilters() {{
     const scoreMatch = minScore < 0 || score >= minScore;
     const textMatch = !searchText || text.includes(searchText);
     
+    const stale = card.dataset.stale === '1';
     let statusMatch = true;
-    const terminal = ['applied', 'success', 'failed', 'not_available', 'not_interested', 'expired'];
+    const terminal = ['applied', 'success', 'interviewing', 'offer', 'rejected', 'no_deal', 'failed', 'not_available', 'not_interested', 'expired'];
     if (statusFilter === 'not_applied') {{
       statusMatch = !terminal.includes(applyStatus);
     }} else if (statusFilter === 'applied') {{
       statusMatch = (applyStatus === 'success' || applyStatus === 'applied');
+    }} else if (statusFilter === 'interviewing') {{
+      statusMatch = (applyStatus === 'interviewing');
+    }} else if (statusFilter === 'rejected') {{
+      statusMatch = (applyStatus === 'rejected');
+    }} else if (statusFilter === 'no_deal') {{
+      statusMatch = (applyStatus === 'no_deal');
     }} else if (statusFilter === 'failed') {{
       statusMatch = (applyStatus === 'failed');
     }} else if (statusFilter === 'not_available') {{
@@ -1197,15 +1700,20 @@ function applyFilters() {{
       statusMatch = (applyStatus === 'not_interested');
     }} else if (statusFilter === 'expired') {{
       statusMatch = (applyStatus === 'expired');
+    }} else if (statusFilter === 'stale') {{
+      statusMatch = stale;
     }}
+    // Stale jobs are hidden everywhere except the dedicated Stale filter.
+    if (statusFilter !== 'stale' && stale) statusMatch = false;
 
     const langMatch = langFilter === 'any' || (langFilter === 'none' ? lang === 'none' : lang === langFilter);
     const typeMatch = typeFilter === 'any' || type === typeFilter;
     const countryMatch = countryFilter === 'any' || country === countryFilter;
     const modeMatch = workModeFilter === 'any' || mode === workModeFilter;
     const companyMatch = !companyFilter || company.includes(companyFilter);
+    const focusMatch = !focusFilter || card.dataset.focused === '1';
 
-    if (scoreMatch && textMatch && statusMatch && langMatch && typeMatch && countryMatch && modeMatch && companyMatch) {{
+    if (scoreMatch && textMatch && statusMatch && langMatch && typeMatch && countryMatch && modeMatch && companyMatch && focusMatch) {{
       card.classList.remove('hidden');
       shown++;
     }} else {{
@@ -1223,8 +1731,12 @@ function applyFilters() {{
       grid.style.display = visible ? '' : 'none';
     }}
   }});
+  saveFilters();
 }}
 
+restoreFilters();
+restoreFilterUI();
+try {{ if (localStorage.getItem(TAB_KEY) === 'stats') showTab('stats'); }} catch (e) {{}}
 applyFilters();
 </script>
 
@@ -1276,7 +1788,8 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     from applypilot.database import (
-        MANUAL_STATUSES, set_job_status, set_job_note, set_job_study, get_connection,
+        MANUAL_STATUSES, set_job_status, set_job_note, set_job_study, set_job_focus,
+        set_job_stale, set_job_highlight, get_connection,
     )
 
     allowed = set(MANUAL_STATUSES) | {"reset"}
@@ -1447,6 +1960,166 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                     return
                 removed = delete_combined(dict(row))
                 self._json({"ok": True, "removed": removed})
+            elif path == "/cover":
+                from applypilot.scoring.cover_letter import generate_one_cover_letter
+                url = data.get("url")
+                if not url:
+                    self._json({"ok": False, "error": "url required"})
+                    return
+                row = get_connection().execute(
+                    "SELECT url, title, site, company, location, country, "
+                    "full_description, tailored_resume_path FROM jobs WHERE url = ?",
+                    (url,),
+                ).fetchone()
+                if not row:
+                    self._json({"ok": False, "error": "job not found"})
+                    return
+                try:
+                    result = generate_one_cover_letter(
+                        dict(row), extra=str(data.get("extra") or ""),
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    self._json({"ok": False, "error": str(exc)})
+                    return
+                self._json({"ok": True, **result})
+            elif path == "/cover/delete":
+                from applypilot.scoring.cover_letter import delete_cover_letter
+                url = data.get("url")
+                if not url:
+                    self._json({"ok": False, "error": "url required"})
+                    return
+                row = get_connection().execute(
+                    "SELECT url, cover_letter_path FROM jobs WHERE url = ?",
+                    (url,),
+                ).fetchone()
+                if not row:
+                    self._json({"ok": False, "error": "job not found"})
+                    return
+                removed = delete_cover_letter(dict(row))
+                self._json({"ok": True, "removed": removed})
+            elif path == "/file/delete":
+                url = data.get("url")
+                kind = data.get("kind")
+                valid_kinds = (
+                    "resume_pdf", "resume_txt", "resume_tex", "cover_pdf", "cover_txt",
+                )
+                if not url or kind not in valid_kinds:
+                    self._json({"ok": False, "error": "url and valid kind required"})
+                    return
+                row = get_connection().execute(
+                    "SELECT tailored_resume_path, cover_letter_path, combined_tex_path "
+                    "FROM jobs WHERE url = ?",
+                    (url,),
+                ).fetchone()
+                if not row:
+                    self._json({"ok": False, "error": "job not found"})
+                    return
+                if kind == "resume_tex":
+                    base = row[2]
+                elif kind.startswith("resume"):
+                    base = row[0]
+                else:
+                    base = row[1]
+                if not base:
+                    self._json({"ok": False, "error": "no file for this job"})
+                    return
+                target = Path(base)
+                if kind.endswith("_pdf"):
+                    target = target.with_suffix(".pdf")
+                target = target.resolve()
+                allowed_dirs = (TAILORED_DIR.resolve(), COVER_LETTER_DIR.resolve())
+                if not any(
+                    str(target).startswith(str(d) + os.sep) for d in allowed_dirs
+                ):
+                    self._json({"ok": False, "error": "forbidden"})
+                    return
+                try:
+                    if target.exists():
+                        target.unlink()
+                except OSError as exc:
+                    self._json({"ok": False, "error": str(exc)})
+                    return
+                self._json({"ok": True, "removed": str(target)})
+            elif path == "/focus":
+                url = data.get("url")
+                if not url:
+                    self._json({"ok": False, "error": "url required"})
+                    return
+                set_job_focus(url, bool(data.get("focused")))
+                self._json({"ok": True})
+            elif path == "/stale":
+                url = data.get("url")
+                if not url:
+                    self._json({"ok": False, "error": "url required"})
+                    return
+                set_job_stale(url, bool(data.get("stale", True)))
+                self._json({"ok": True})
+            elif path == "/highlight":
+                from applypilot.highlights import extract_key_concepts
+
+                url = data.get("url")
+                if not url:
+                    self._json({"ok": False, "error": "url required"})
+                    return
+                highlighted = bool(data.get("highlighted", True))
+                concepts: list[str] = []
+                if highlighted:
+                    row = get_connection().execute(
+                        "SELECT url, title, site, company, full_description, "
+                        "highlight_concepts FROM jobs WHERE url = ?",
+                        (url,),
+                    ).fetchone()
+                    if not row:
+                        self._json({"ok": False, "error": "job not found"})
+                        return
+                    job = dict(row)
+                    existing = []
+                    try:
+                        import json as _json
+                        existing = _json.loads(job.get("highlight_concepts") or "[]")
+                    except (ValueError, TypeError):
+                        existing = []
+                    if existing:
+                        concepts = existing
+                    else:
+                        try:
+                            concepts = extract_key_concepts(job)
+                        except Exception as exc:  # noqa: BLE001 - report to UI
+                            self._json({"ok": False, "error": str(exc)})
+                            return
+                set_job_highlight(url, highlighted, concepts if highlighted else None)
+                self._json({"ok": True, "concepts": concepts})
+            elif path == "/inbox/scan":
+                from applypilot.inbox import GmailNotConfigured, scan_and_cache
+                url = data.get("url")
+                if not url:
+                    self._json({"ok": False, "error": "url required"})
+                    return
+                row = get_connection().execute(
+                    "SELECT url, title, site, company, location, application_url "
+                    "FROM jobs WHERE url = ?",
+                    (url,),
+                ).fetchone()
+                if not row:
+                    self._json({"ok": False, "error": "job not found"})
+                    return
+                try:
+                    result = scan_and_cache(dict(row))
+                except GmailNotConfigured as exc:
+                    self._json({"ok": False, "error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - defensive
+                    self._json({"ok": False, "error": str(exc)})
+                    return
+                self._json({"ok": True, **result})
+            elif path == "/inbox/free":
+                from applypilot.inbox import free as free_inbox
+                url = data.get("url")
+                if not url:
+                    self._json({"ok": False, "error": "url required"})
+                    return
+                free_inbox(url)
+                self._json({"ok": True})
             elif path == "/answer/add":
                 from applypilot.answers import add_answer
                 q = (data.get("question") or "").strip()

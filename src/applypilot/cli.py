@@ -401,6 +401,95 @@ def combine(
 
 
 @app.command()
+def cover_letter(
+    url: str = typer.Argument(..., help="URL of the job to write a cover letter for."),
+    instructions: str = typer.Option(
+        "", "--instructions", "-i",
+        help="Optional one-off instructions for this letter (e.g. 'emphasize the Kubernetes work').",
+    ),
+) -> None:
+    """Generate a cover letter for a single job, on demand.
+
+    Uses the job's tailored resume when present, and honours COVER_LETTER_PROMPT
+    from ~/.applypilot/.env.
+    """
+    _bootstrap()
+
+    from applypilot.config import check_tier
+    from applypilot.database import get_connection
+    from applypilot.scoring.cover_letter import generate_one_cover_letter
+
+    check_tier(2, "Cover letter generation")
+
+    row = get_connection().execute("SELECT * FROM jobs WHERE url = ?", (url,)).fetchone()
+    if not row:
+        console.print(f"[red]No job found for URL:[/red] {url}")
+        raise typer.Exit(1)
+
+    job = dict(row)
+    console.print(
+        f"[cyan]Writing cover letter for[/cyan] {job.get('title') or 'job'} "
+        f"[dim]({job.get('site') or 'unknown'})[/dim]..."
+    )
+    try:
+        result = generate_one_cover_letter(job, extra=instructions)
+    except Exception as exc:  # noqa: BLE001 - user-facing CLI: report and exit
+        console.print(f"[red]Cover letter failed:[/red] {exc}")
+        raise typer.Exit(1)
+
+    console.print(f"[green]Cover letter:[/green] {result['path']}")
+    if result.get("pdf_path"):
+        console.print(f"[green]PDF:[/green]          {result['pdf_path']}")
+
+
+@app.command()
+def gmail_auth() -> None:
+    """Authorize read-only Gmail access (one-time OAuth). Never sends or deletes."""
+    _bootstrap()
+
+    from applypilot.inbox import GmailNotConfigured, run_oauth_flow
+
+    try:
+        path = run_oauth_flow()
+    except GmailNotConfigured as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Gmail authorized (read-only).[/green] Token: {path}")
+
+
+@app.command()
+def inbox(
+    url: str = typer.Argument(..., help="URL of the job to scan the inbox for."),
+) -> None:
+    """Pull a job company's Gmail thread and extract status + action items (cached)."""
+    _bootstrap()
+
+    from applypilot.config import check_tier
+    from applypilot.database import get_connection
+    from applypilot.inbox import GmailNotConfigured, scan_and_cache
+
+    check_tier(2, "Inbox insights")
+
+    row = get_connection().execute(
+        "SELECT url, title, site, company, location, application_url "
+        "FROM jobs WHERE url = ?",
+        (url,),
+    ).fetchone()
+    if not row:
+        console.print(f"[red]No job found for URL:[/red] {url}")
+        raise typer.Exit(1)
+
+    console.print("[cyan]Scanning Gmail for this company...[/cyan]")
+    try:
+        result = scan_and_cache(dict(row))
+    except GmailNotConfigured as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]{result['messages']} email(s) matched.[/green]\n")
+    console.print(result["summary"])
+
+
+@app.command()
 def classify(
     limit: int = typer.Option(0, "--limit", "-l", help="Max jobs to classify (0 = all missing)."),
     batch_size: int = typer.Option(20, "--batch-size", help="Jobs per LLM request."),

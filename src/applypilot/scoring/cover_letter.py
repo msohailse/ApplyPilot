@@ -7,11 +7,13 @@ profile at runtime. No hardcoded personal information.
 
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
-from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
+from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_env, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
@@ -89,7 +91,7 @@ def _build_cover_letter_prompt(profile: dict, job: dict | None = None) -> str:
                 "Do not add a new paragraph and do not exceed the 3-paragraph structure."
             )
 
-    return f"""Write a cover letter for {sign_off_name}. The goal is to get an interview.
+    prompt = f"""Write a cover letter for {sign_off_name}. The goal is to get an interview.
 
 STRUCTURE: 3 short paragraphs. Under 250 words. Every sentence must earn its place.
 
@@ -98,6 +100,11 @@ PARAGRAPH 1 (2-3 sentences): Open with a specific thing YOU built that solves TH
 PARAGRAPH 2 (3-4 sentences): Pick 2 achievements from the resume that are MOST relevant to THIS job. Use numbers. Frame as solving their problem, not listing your accomplishments.{projects_hint}{metrics_hint}
 
 PARAGRAPH 3 (1-2 sentences): One specific thing about the company from the job description (a product, a technical challenge, a team structure). Then close. "Happy to walk through any of this in more detail." or "Let's discuss." Nothing else.{availability_note}
+
+ACCURACY (never get these wrong):
+- Use the EXACT company name and EXACT job title from the TARGET JOB block. Never invent, shorten, or "improve" the company name.
+- Only reference facts that appear in the job description or the resume. If a detail is unclear or missing, stay general instead of guessing.
+- Be creative in phrasing, narrative, and how you connect the dots, but every fact (company, role, achievements, numbers, tools) must be correct.
 
 BANNED WORDS AND PHRASES (automated validator rejects ANY of these — do not use even once):
 {all_banned}
@@ -125,6 +132,22 @@ Sign off: just "{sign_off_name}"
 Output ONLY the letter text. No subject lines. No "Here is the cover letter:" preamble. No notes after the sign-off.
 Start DIRECTLY with "Dear Hiring Manager," and end with the name."""
 
+    # Optional candidate-authored guidance, set via COVER_LETTER_PROMPT in .env.
+    extra = os.environ.get("COVER_LETTER_PROMPT", "").strip()
+    if extra:
+        prompt += (
+            "\n\nADDITIONAL INSTRUCTIONS FROM THE CANDIDATE (follow these on top of "
+            "everything above, without breaking any of the rules):\n" + extra
+        )
+    return prompt
+
+
+def _prefix_for(job: dict) -> str:
+    """Build the ``Company_Title`` filename prefix for cover-letter outputs."""
+    safe_title = re.sub(r"[^\w\s-]", "", job.get("title") or "role")[:50].strip().replace(" ", "_")
+    safe_site = re.sub(r"[^\w\s-]", "", job.get("site") or "company")[:20].strip().replace(" ", "_")
+    return f"{safe_site}_{safe_title}"
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -146,6 +169,7 @@ def _strip_preamble(text: str) -> str:
 def generate_cover_letter(
     resume_text: str, job: dict, profile: dict,
     max_retries: int = 3, validation_mode: str = "normal",
+    extra: str = "",
 ) -> str:
     """Generate a cover letter with fresh context on each retry + auto-sanitize.
 
@@ -173,6 +197,14 @@ def generate_cover_letter(
     letter = ""
     client = get_client("cover")
     cl_prompt_base = _build_cover_letter_prompt(profile, job)
+
+    # One-off instructions typed by the candidate for THIS letter.
+    extra = (extra or "").strip()
+    if extra:
+        cl_prompt_base += (
+            "\n\nADDITIONAL INSTRUCTIONS FOR THIS LETTER (follow these on top of "
+            "everything above, without breaking any of the rules):\n" + extra
+        )
 
     for attempt in range(max_retries + 1):
         # Fresh conversation every attempt
@@ -327,3 +359,86 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
         "errors": error_count,
         "elapsed": elapsed,
     }
+
+
+# ── On-demand (single job) ───────────────────────────────────────────────
+
+def generate_one_cover_letter(
+    job: dict, validation_mode: str = "normal", extra: str = "",
+) -> dict:
+    """Generate and persist a cover letter for a single job, on demand.
+
+    Uses the job's tailored resume text when available (more relevant), else the
+    base resume. Writes ``<Company_Title>_CL.txt`` (+ best-effort PDF) and
+    records the path on the job.
+
+    Args:
+        extra: Optional one-off instructions typed by the candidate (e.g. "mention
+            my relocation", "emphasize the Kubernetes work"). Appended to the prompt.
+
+    Returns:
+        {"path": str, "pdf_path": str | None, "prefix": str}
+    """
+    load_env()
+    profile = load_profile()
+
+    tailored = job.get("tailored_resume_path")
+    if tailored and Path(tailored).exists():
+        resume_text = Path(tailored).read_text(encoding="utf-8")
+    else:
+        resume_text = RESUME_PATH.read_text(encoding="utf-8")
+
+    letter = generate_cover_letter(
+        resume_text, job, profile, validation_mode=validation_mode, extra=extra,
+    )
+
+    COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
+    prefix = _prefix_for(job)
+    cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
+    cl_path.write_text(letter, encoding="utf-8")
+
+    pdf_path = None
+    try:
+        from applypilot.scoring.pdf import convert_to_pdf
+
+        pdf_path = str(convert_to_pdf(cl_path))
+    except Exception:
+        log.debug("Cover letter PDF generation failed for %s", cl_path, exc_info=True)
+
+    conn = get_connection()
+    conn.execute(
+        "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, "
+        "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
+        (str(cl_path), datetime.now(timezone.utc).isoformat(), job["url"]),
+    )
+    conn.commit()
+
+    log.info("Cover letter written: %s (pdf=%s)", cl_path, pdf_path)
+    return {"path": str(cl_path), "pdf_path": pdf_path, "prefix": prefix}
+
+
+def delete_cover_letter(job: dict) -> list[str]:
+    """Delete a job's generated cover letter ``.txt``/``.pdf`` and clear the DB path.
+
+    Returns:
+        List of file paths that were deleted.
+    """
+    removed: list[str] = []
+    cl = job.get("cover_letter_path")
+    if cl:
+        cl_path = Path(cl)
+        for path in (cl_path, cl_path.with_suffix(".pdf")):
+            try:
+                if path.exists():
+                    path.unlink()
+                    removed.append(str(path))
+            except OSError as exc:  # pragma: no cover - defensive
+                log.warning("Could not delete %s: %s", path, exc)
+
+    conn = get_connection()
+    conn.execute(
+        "UPDATE jobs SET cover_letter_path=NULL, cover_letter_at=NULL WHERE url=?",
+        (job["url"],),
+    )
+    conn.commit()
+    return removed

@@ -77,7 +77,7 @@ Run **only discovery, enrichment, and scoring** — no resumes, no cover letters
 applypilot run discover enrich score
 ```
 
-Then open the dashboard and click **Combine Resume** only on the jobs you care about:
+Then open the dashboard and click **Generate Resume** only on the jobs you care about:
 
 ```bash
 applypilot dashboard
@@ -146,7 +146,7 @@ Your personal data in one structured file: contact info, work authorization, com
 Job search queries, target titles, locations, boards. Run multiple searches with different parameters.
 
 ### `.env`
-API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `CAPSOLVER_API_KEY` (optional). Also where you register a LaTeX master for Combine Resume (below).
+API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `CAPSOLVER_API_KEY` (optional). Also where you register a LaTeX master for Generate Resume (below).
 
 ### Resume files (where to put your resume)
 
@@ -156,12 +156,12 @@ Everything lives in `~/.applypilot/`:
 |------|---------|
 | `resume.txt` | **Master resume as plain text** — the only resume the AI reads. Used by **Score**, **Tailor**, and **Cover Letter**. Created by `applypilot init`; replace it with your own text any time. |
 | `resume.pdf` | Optional master PDF, uploaded during auto-apply. |
-| your LaTeX master `.tex` | Used by **Combine Resume** to render a job's tailored content in your own template. Register it in `.env` (see [Combine Resume](#combine-resume-latex-master)). |
+| your LaTeX master `.tex` | Used by **Generate Resume** to render a job's tailored content in your own template. Register it in `.env` (see [Generate Resume](#generate-resume-latex-master)). |
 
 Setup by path:
 
 1. **Plain text (required):** put your resume at `~/.applypilot/resume.txt` (and optionally `~/.applypilot/resume.pdf`).
-2. **LaTeX (optional, for Combine Resume):** add to `~/.applypilot/.env`:
+2. **LaTeX (optional, for Generate Resume):** add to `~/.applypilot/.env`:
 
    ```bash
    APPLYPILOT_BASE_RESUME_TEX=/absolute/path/to/resume.tex
@@ -209,9 +209,9 @@ applypilot apply --gen --url URL       # generate prompt file for manual debuggi
 
 ---
 
-## Combine Resume (LaTeX master)
+## Generate Resume (LaTeX master)
 
-The **Tailor** stage produces a job-specific resume as text (`~/.applypilot/tailored_resumes/*.txt`). **Combine Resume** takes that already-paid-for tailoring and injects it into *your own* LaTeX resume, then compiles a fresh PDF — so every application keeps your visual style while still being tuned to the job. It never modifies your master file and never re-analyzes the job (no extra tokens).
+The **Tailor** stage produces a job-specific resume as text (`~/.applypilot/tailored_resumes/*.txt`). **Generate Resume** takes that already-paid-for tailoring and injects it into *your own* LaTeX resume, then compiles a fresh PDF — so every application keeps your visual style while still being tuned to the job. It never modifies your master file and never re-analyzes the job (no extra tokens).
 
 ### 1. Provide a LaTeX master resume
 
@@ -233,7 +233,7 @@ The master is only ever **read**. If it `\documentclass`-es a custom class (e.g.
 
 ### 2. Use it
 
-- **Dashboard:** run `applypilot dashboard`, then click **Combine Resume** on any job. If that job has no tailored resume yet, ApplyPilot **tailors it on the spot (that one job only)** and renders it into your LaTeX master. Optionally type guidance (e.g. *"emphasize Kubernetes"*) in the prompt. The card then shows **Resume PDF / Resume TEX** links, and a **Delete Resume** button removes the generated `.tex`/`.pdf`.
+- **Dashboard:** run `applypilot dashboard`, then click **Generate Resume** on any job. If that job has no tailored resume yet, ApplyPilot **tailors it on the spot (that one job only)** and renders it into your LaTeX master. Optionally type guidance (e.g. *"emphasize Kubernetes"*) in the prompt. The card then shows **Resume PDF / Resume TEX** links, and a **Delete Resume** button removes the generated `.tex`/`.pdf`.
 - **CLI:**
 
   ```bash
@@ -244,9 +244,56 @@ The master is only ever **read**. If it `\documentclass`-es a custom class (e.g.
 ### 3. Output & fallback
 
 - Writes a new `~/.applypilot/tailored_resumes/Company_Role.tex` plus a compiled `Company_Role.pdf`. PDF compilation needs a TeX engine (`pdflatex` from TeX Live / MacTeX). Your master file is untouched.
-- **No LaTeX master found?** Combine falls back to ApplyPilot's default pipeline and renders the tailored text to PDF via Playwright, so the action still succeeds.
+- **No LaTeX master found?** Generation falls back to ApplyPilot's default pipeline and renders the tailored text to PDF via Playwright, so the action still succeeds.
 
-> Combine Resume uses the LLM (`LLM_MODEL_TAILOR`) and is strictly per-job — one click affects only that job.
+> Generate Resume uses the LLM (`LLM_MODEL_TAILOR`) and is strictly per-job — one click affects only that job.
+
+---
+
+## Generate Cover Letter
+
+**Generate Cover Letter** writes a per-job cover letter on demand, same as Generate Resume — one click, one job. It uses the job's tailored resume when present and the `.env` LLM (`LLM_MODEL_COVER`). The prompt always enforces the **exact company name and job title** and forbids fabricated facts.
+
+- **Dashboard:** click **Generate Cover Letter** on any job card. The card then shows **Cover PDF / Cover TXT** links and a **Delete Cover Letter** button.
+- **CLI:** `applypilot cover-letter <job-url>`
+- **Tune the prompt:** add `COVER_LETTER_PROMPT` to `~/.applypilot/.env` — extra instructions appended to the built-in prompt:
+
+  ```bash
+  COVER_LETTER_PROMPT=Lead with one concrete thing I built that matches this role...
+  ```
+
+---
+
+## Inbox insights (Gmail, read-only)
+
+For applied jobs, **Inbox Insights** pulls that company's email thread from Gmail and uses the LLM to extract **status + action items** (next step, deadlines, documents, a suggestion). The result is **cached per job** and never regenerated until you hit **Free**.
+
+Setup (one time):
+
+1. Google Cloud Console: enable **Gmail API**, create an **OAuth client ID → Desktop app**, download the JSON.
+2. In `~/.applypilot/.env`:
+
+   ```bash
+   GMAIL_CREDENTIALS_PATH=~/.applypilot/gmail_credentials.json
+   # GMAIL_LABEL=Job Applications   # optional: restrict the scan to one label
+   ```
+
+3. Authorize once: `applypilot gmail-auth` (opens the browser; stores a local token).
+
+Use:
+
+- **Dashboard:** on an applied job, click **Inbox Insights** (then **Refresh** / **Free**).
+- **CLI:** `applypilot inbox <job-url>`
+
+Security: scope is **`gmail.readonly`** — it can never send, delete, or modify mail. The token is stored locally (`~/.applypilot/gmail_token.json`, chmod 600); secret paths live in `.env`. Revoke anytime from your Google account.
+
+> Requires the optional deps: `pip install "applypilot[gmail]"` (or `google-auth-oauthlib google-api-python-client`).
+
+---
+
+## Focus
+
+Mark the jobs you're actively applying to with the **Focus** button on the card (next to the title). Focused cards are bolded/highlighted, and the **Focused only** filter at the top shows just those — so you don't lose them in the pile.
 
 ---
 

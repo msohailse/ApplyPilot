@@ -5,6 +5,8 @@ and exports to PDF using headless Chromium via Playwright.
 """
 
 import logging
+import re
+from html import escape
 from pathlib import Path
 
 from applypilot.config import TAILORED_DIR
@@ -331,6 +333,48 @@ li {{
 </html>"""
 
 
+def build_cover_letter_html(text: str) -> str:
+    """Build a clean, single-font HTML letter from plain cover-letter text.
+
+    Cover letters are plain paragraphs (no resume sections), so they must NOT
+    go through parse_resume/build_html -- which would render the greeting as the
+    resume "name" heading and the body as tiny contact text (mixed fonts).
+    """
+    text = (text or "").strip()
+    blocks = [b for b in re.split(r"\n\s*\n", text) if b.strip()]
+    if not blocks:
+        blocks = [text]
+    paras = "".join(
+        f"<p>{escape(' '.join(block.split()))}</p>" for block in blocks
+    )
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@page {{ size: letter; margin: 1in; }}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{
+    font-family: 'Calibri', 'Segoe UI', Arial, sans-serif;
+    font-size: 11pt;
+    line-height: 1.5;
+    color: #1a1a1a;
+}}
+p {{ margin: 0 0 1em 0; }}
+p:last-child {{ margin-bottom: 0; }}
+</style>
+</head>
+<body>
+{paras}
+</body>
+</html>"""
+
+
+def is_cover_letter(path: Path, text: str) -> bool:
+    """Heuristic: is this text file a cover letter rather than a resume?"""
+    return path.name.endswith("_CL.txt") or text.lstrip().lower().startswith("dear ")
+
+
 # ── PDF Renderer ─────────────────────────────────────────────────────────
 
 def render_pdf(html: str, output_path: str) -> None:
@@ -373,8 +417,10 @@ def convert_to_pdf(
     """
     text_path = Path(text_path)
     text = text_path.read_text(encoding="utf-8")
-    resume = parse_resume(text)
-    html = build_html(resume)
+    if is_cover_letter(text_path, text):
+        html = build_cover_letter_html(text)
+    else:
+        html = build_html(parse_resume(text))
 
     if html_only:
         out = output_path or text_path.with_suffix(".html")
@@ -411,7 +457,7 @@ def batch_convert(limit: int = 50) -> int:
     # (they get their own conversion calls)
     candidates = [
         f for f in txt_files
-        if not f.name.endswith("_JOB.txt")
+        if not f.name.endswith("_JOB.txt") and not f.name.endswith("_CL.txt")
     ]
 
     # Filter to those without a corresponding PDF

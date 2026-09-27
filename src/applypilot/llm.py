@@ -303,6 +303,8 @@ _STAGE_MODEL_ENV: dict[str, str] = {
     "classify": "LLM_MODEL_CLASSIFY",
     "tailor": "LLM_MODEL_TAILOR",
     "cover": "LLM_MODEL_COVER",
+    "inbox": "LLM_MODEL_INBOX",
+    "highlight": "LLM_MODEL_HIGHLIGHT",
 }
 
 

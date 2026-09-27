@@ -303,3 +303,29 @@ employers:
     tenant: "canadiansolar"
     site_id: "CanadianSolar"
     base_url: "https://canadiansolar.wd5.myworkdayjobs.com"
+
+  # ── Norwegian Employers (Workday) ───────────────────────────────────────
+
+  equinor:
+    name: "Equinor"
+    tenant: "equinor"
+    site_id: "EQNR"
+    base_url: "https://equinor.wd3.myworkdayjobs.com"
+
+  storebrand:
+    name: "Storebrand"
+    tenant: "storebrand"
+    site_id: "Storebrand_Careers"
+    base_url: "https://storebrand.wd3.myworkdayjobs.com"
+
+  autostore:
+    name: "AutoStore"
+    tenant: "autostore"
+    site_id: "AutoStore"
+    base_url: "https://autostore.wd3.myworkdayjobs.com"
+
+  wilhelmsen:
+    name: "Wilhelmsen"
+    tenant: "wilhelmsen"
+    site_id: "Wilhelmsen"
+    base_url: "https://wilhelmsen.wd3.myworkdayjobs.com"

@@ -134,6 +134,20 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     """)
     conn.commit()
 
+    # Gmail inbox insights cache (one row per job). Generated on demand and
+    # kept until the user clears it ("Free") -- never regenerated automatically.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS inbox_cache (
+            url          TEXT PRIMARY KEY,
+            message_ids  TEXT,
+            thread_text  TEXT,
+            summary      TEXT,
+            model        TEXT,
+            created_at   TEXT
+        )
+    """)
+    conn.commit()
+
     # Run migrations for any columns added after initial schema
     ensure_columns(conn)
 
@@ -167,6 +181,17 @@ _ALL_COLUMNS: dict[str, str] = {
     "notes": "TEXT",
     # "Role to be studied" note (marks a job as a learning/role-model target)
     "study_note": "TEXT",
+    # Focus flag: user-marked jobs they're actively applying to (card is bolded)
+    "focused": "INTEGER DEFAULT 0",
+    # Highlight flag + LLM-extracted key concepts for the job
+    "highlighted": "INTEGER DEFAULT 0",
+    "highlight_concepts": "TEXT",
+    # Set the moment the user touches a job (note/status/focus/study/docs) so it
+    # is never silently deleted by a later discovery/enrichment run.
+    "protected": "INTEGER DEFAULT 0",
+    # Manually hidden from the main list. Kept forever (and in exports) for
+    # success-rate calculations -- never deleted.
+    "stale": "INTEGER DEFAULT 0",
     # Company name (employer), separate from `site` (job board / source)
     "company": "TEXT",
     # Scoring
@@ -439,7 +464,12 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
 
 
 # Manual triage statuses settable from the dashboard.
-MANUAL_STATUSES = ("applied", "not_available", "not_interested", "failed")
+# "outcome" = post-application stages (job was applied to, then progressed).
+MANUAL_STATUSES = (
+    "applied", "interviewing", "rejected", "no_deal", "offer",
+    "not_available", "not_interested", "failed",
+)
+OUTCOME_STATUSES = ("interviewing", "rejected", "no_deal", "offer")
 
 
 def set_job_status(url: str, status: str, reason: str | None = None) -> None:
@@ -457,36 +487,140 @@ def set_job_status(url: str, status: str, reason: str | None = None) -> None:
     if status == "applied":
         conn.execute(
             "UPDATE jobs SET apply_status = 'applied', applied_at = ?, "
-            "apply_error = NULL WHERE url = ?",
+            "apply_error = NULL, protected = 1 WHERE url = ?",
             (now, url),
+        )
+    elif status in OUTCOME_STATUSES:
+        # Post-application outcome: keep applied_at (the job WAS applied to).
+        conn.execute(
+            "UPDATE jobs SET apply_status = ?, apply_error = ?, "
+            "protected = 1 WHERE url = ?",
+            (status, reason or status, url),
         )
     elif status in ("not_available", "not_interested", "failed"):
         conn.execute(
             "UPDATE jobs SET apply_status = ?, apply_error = ?, "
-            "applied_at = NULL WHERE url = ?",
+            "applied_at = NULL, protected = 1 WHERE url = ?",
             (status, reason or status, url),
         )
     else:  # "reset" (or any unknown) -> clear
         conn.execute(
             "UPDATE jobs SET apply_status = NULL, apply_error = NULL, "
-            "applied_at = NULL, apply_attempts = 0 WHERE url = ?",
+            "applied_at = NULL, apply_attempts = 0, protected = 1 WHERE url = ?",
             (url,),
         )
     conn.commit()
 
 
 def set_job_note(url: str, note: str) -> None:
-    """Save a free-text note for a job."""
+    """Save a free-text note for a job (marks it protected)."""
     conn = get_connection()
-    conn.execute("UPDATE jobs SET notes = ? WHERE url = ?", (note or "", url))
+    conn.execute("UPDATE jobs SET notes = ?, protected = 1 WHERE url = ?", (note or "", url))
     conn.commit()
 
 
 def set_job_study(url: str, note: str) -> None:
     """Mark/update a job as a 'role to study' with a note (blank clears it)."""
     conn = get_connection()
-    conn.execute("UPDATE jobs SET study_note = ? WHERE url = ?", (note or "", url))
+    conn.execute("UPDATE jobs SET study_note = ?, protected = 1 WHERE url = ?", (note or "", url))
     conn.commit()
+
+
+def set_job_focus(url: str, focused: bool) -> None:
+    """Mark/unmark a job as focused (the user is actively applying to it)."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE jobs SET focused = ?, protected = 1 WHERE url = ?",
+        (1 if focused else 0, url),
+    )
+    conn.commit()
+
+
+def set_job_highlight(url: str, highlighted: bool, concepts: list[str] | None = None) -> None:
+    """Mark/unmark a job as highlighted, optionally storing its key concepts."""
+    import json as _json
+
+    conn = get_connection()
+    if concepts is not None:
+        conn.execute(
+            "UPDATE jobs SET highlighted = ?, highlight_concepts = ?, protected = 1 "
+            "WHERE url = ?",
+            (1 if highlighted else 0, _json.dumps(concepts), url),
+        )
+    else:
+        conn.execute(
+            "UPDATE jobs SET highlighted = ?, protected = 1 WHERE url = ?",
+            (1 if highlighted else 0, url),
+        )
+    conn.commit()
+
+
+def set_job_stale(url: str, stale: bool = True) -> None:
+    """Move a job to (or restore it from) the Stale section.
+
+    Stale jobs are never deleted -- they stay in the data and in exports so
+    success-rate stats remain accurate.
+    """
+    conn = get_connection()
+    conn.execute(
+        "UPDATE jobs SET stale = ?, protected = 1 WHERE url = ?",
+        (1 if stale else 0, url),
+    )
+    conn.commit()
+
+
+def mark_job_protected(url: str) -> None:
+    """Flag a job as user-touched so a later run never silently deletes it."""
+    conn = get_connection()
+    conn.execute("UPDATE jobs SET protected = 1 WHERE url = ?", (url,))
+    conn.commit()
+
+
+def job_has_user_data(url: str, conn=None) -> bool:
+    """True if the job carries any user-created data (so it must not be deleted)."""
+    conn = conn or get_connection()
+    row = conn.execute(
+        "SELECT notes, study_note, apply_status, applied_at, apply_error, focused, "
+        "tailored_resume_path, cover_letter_path, protected, highlighted, "
+        "highlight_concepts "
+        "FROM jobs WHERE url = ?",
+        (url,),
+    ).fetchone()
+    if row is None:
+        return True  # unknown row -> be safe and never delete
+    if int(row["protected"] or 0):
+        return True
+    for key in ("notes", "study_note", "apply_status", "applied_at", "apply_error",
+                "tailored_resume_path", "cover_letter_path", "highlight_concepts"):
+        if (row[key] or "").strip():
+            return True
+    if int(row["focused"] or 0) or int(row["highlighted"] or 0):
+        return True
+    if conn.execute("SELECT 1 FROM inbox_cache WHERE url = ?", (url,)).fetchone():
+        return True
+    try:
+        from applypilot.todos import load_todos
+
+        if any((t.get("url") or "") == url for t in load_todos()):
+            return True
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return False
+
+
+def delete_job_if_unused(url: str, conn=None) -> bool:
+    """Delete a job row only when it has no user data. Returns True if deleted.
+
+    Used during URL canonicalization: a row with notes / applied status / docs /
+    focused / study note / inbox cache / todo reference is kept (never dropped)
+    even when its URL is superseded by another listing.
+    """
+    conn = conn or get_connection()
+    if job_has_user_data(url, conn):
+        return False
+    conn.execute("DELETE FROM jobs WHERE url = ?", (url,))
+    conn.commit()
+    return True
 
 
 def get_study_jobs(conn=None) -> list[dict]:
@@ -498,3 +632,48 @@ def get_study_jobs(conn=None) -> list[dict]:
         "ORDER BY fit_score DESC NULLS LAST, title"
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Gmail inbox insights cache ───────────────────────────────────────────
+
+def get_inbox_cache(url: str, conn=None) -> dict | None:
+    """Return the cached inbox insight for a job, or None."""
+    conn = conn or get_connection()
+    row = conn.execute("SELECT * FROM inbox_cache WHERE url = ?", (url,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_inbox_cached_urls(conn=None) -> set[str]:
+    """Return the set of job URLs that already have a cached inbox insight."""
+    conn = conn or get_connection()
+    return {r[0] for r in conn.execute("SELECT url FROM inbox_cache").fetchall()}
+
+
+def get_inbox_summaries(conn=None) -> dict[str, str]:
+    """Return {job_url: cached_summary} for all cached inbox insights."""
+    conn = conn or get_connection()
+    rows = conn.execute("SELECT url, summary FROM inbox_cache").fetchall()
+    return {r[0]: (r[1] or "") for r in rows}
+
+
+def save_inbox_cache(
+    url: str, message_ids: str, thread_text: str, summary: str, model: str,
+) -> None:
+    """Insert or replace the cached inbox insight for a job."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO inbox_cache (url, message_ids, thread_text, summary, model, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(url) DO UPDATE SET message_ids=excluded.message_ids, "
+        "thread_text=excluded.thread_text, summary=excluded.summary, "
+        "model=excluded.model, created_at=excluded.created_at",
+        (url, message_ids, thread_text, summary, model, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+
+
+def delete_inbox_cache(url: str) -> None:
+    """Clear the cached inbox insight for a job."""
+    conn = get_connection()
+    conn.execute("DELETE FROM inbox_cache WHERE url = ?", (url,))
+    conn.commit()
