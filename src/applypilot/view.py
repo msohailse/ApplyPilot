@@ -28,7 +28,8 @@ from applypilot.config import (
     load_profile,
 )
 from applypilot.database import (
-    ensure_columns, get_connection, get_inbox_summaries, get_study_jobs,
+    ensure_columns, get_connection, get_inbox_rows, get_inbox_summaries,
+    get_study_jobs,
 )
 from applypilot.enrichment.classify import backfill_classifications, backfill_company_from_site
 from applypilot.links import load_links
@@ -354,6 +355,64 @@ def _job_inbox_html(job: dict, inbox_cached: str | None) -> str:
         '<button class="mark-btn inbox-scan" onclick="scanInbox(this)">Inbox Insights</button>'
         '</div>'
     )
+
+
+def _render_inbox_tab_html() -> str:
+    """Render the Inbox tab: applied jobs grouped by email-derived category."""
+    from applypilot.inbox import CATEGORY_META, CATEGORY_ORDER
+
+    cached = get_inbox_rows()
+    jobs = get_connection().execute(
+        "SELECT url, title, company, site, apply_status, applied_at FROM jobs "
+        "WHERE apply_status IN "
+        "('applied','success','interviewing','offer','rejected','no_deal') "
+        "ORDER BY COALESCE(applied_at, '') DESC"
+    ).fetchall()
+
+    groups: dict[str, list[str]] = {k: [] for k in CATEGORY_ORDER}
+    for j in jobs:
+        cache = cached.get(j["url"]) or {}
+        cat = (cache.get("category") or "").strip() or "unscanned"
+        if cat not in groups:
+            cat = "other"
+        title = escape(j["title"] or "Job")
+        comp = escape(j["company"] or j["site"] or "")
+        url = escape(j["url"] or "")
+        summary = cache.get("summary") or ""
+        summary_html = (
+            f'<pre class="inbox-body">{escape(summary)}</pre>' if summary else ""
+        )
+        groups[cat].append(
+            f'<div class="inbox-item">'
+            f'<a href="{url}" target="_blank" rel="noopener">{title}</a>'
+            f' <span class="study-co">{comp}</span>'
+            f'{summary_html}</div>'
+        )
+
+    cards = ""
+    for key in CATEGORY_ORDER:
+        items = groups.get(key) or []
+        if not items:
+            continue
+        label = CATEGORY_META[key][0]
+        cards += (
+            f'<details class="inbox-group" open>'
+            f'<summary>{escape(label)} <span class="inbox-count">{len(items)}</span></summary>'
+            f'<div class="inbox-group-body">{"".join(items)}</div>'
+            f"</details>"
+        )
+    if not cards:
+        cards = '<p class="muted">No applied jobs yet. Mark some as Applied first.</p>'
+
+    return f"""
+<div class="inbox-tab-head">
+  <h2>Inbox insights</h2>
+  <button class="mark-btn inbox-scan" onclick="scanAppliedInbox(this)">Scan applied jobs</button>
+</div>
+<p class="subtitle">Applications grouped by what your inbox says: offers, interviews,
+assessments, screening, waiting, rejections.</p>
+{cards}
+"""
 
 
 def _downloads_dir(kind: str) -> Path:
@@ -793,6 +852,7 @@ def render_dashboard_html() -> str:
     todos_html = _render_todos_html()
     links_html = _render_links_html()
     roles_html = _render_roles_html()
+    inbox_tab_html = _render_inbox_tab_html()
     study_html = _render_study_html()
     answers_html = _render_answers_html()
 
@@ -1239,6 +1299,16 @@ def render_dashboard_html() -> str:
   .inbox-body {{ white-space: pre-wrap; font-family: inherit; font-size: 0.8rem; color: #cbd5e1; margin: 0; }}
   .mark-btn.inbox-scan {{ background: #1e3a5f; border-color: #2a7ab5; color: #93c5fd; }}
   .mark-btn.inbox-scan:hover {{ background: #2a7ab5; border-color: #2a7ab5; color: #fff; }}
+  .inbox-tab-head {{ display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.4rem; }}
+  .inbox-tab-head h2 {{ font-size: 1.3rem; }}
+  .inbox-group {{ background: #0f172a; border: 1px solid #1e293b; border-radius: 10px; margin-bottom: 0.75rem; padding: 0.6rem 1rem; }}
+  .inbox-group > summary {{ cursor: pointer; font-weight: 700; color: #93c5fd; font-size: 1rem; }}
+  .inbox-count {{ background: #1e293b; color: #cbd5e1; font-size: 0.75rem; padding: 0.05rem 0.5rem; border-radius: 999px; margin-left: 0.4rem; }}
+  .inbox-group-body {{ margin-top: 0.6rem; }}
+  .inbox-item {{ padding: 0.5rem 0; border-top: 1px solid #1e293b; }}
+  .inbox-item:first-child {{ border-top: none; }}
+  .inbox-item a {{ color: #93c5fd; text-decoration: none; font-weight: 600; }}
+  .inbox-item a:hover {{ text-decoration: underline; }}
   .focus-filter-btn.active {{ background: #f59e0b; border-color: #f59e0b; color: #0f172a; font-weight: bold; }}
 
   /* Post-application outcome buttons (hidden until the job is applied) */
@@ -1421,6 +1491,7 @@ def render_dashboard_html() -> str:
   <span class="topnav-brand">ApplyPilot</span>
   <button class="tab-btn active" data-tab="jobs" onclick="showTab('jobs', event)">Jobs</button>
   <button class="tab-btn" data-tab="stats" onclick="showTab('stats', event)">Report</button>
+  <button class="tab-btn" data-tab="inbox" onclick="showTab('inbox', event)">Inbox</button>
   <span class="nav-variant">
     <label for="resume-variant">Resume:</label>
     <select id="resume-variant" class="filter-select" onchange="saveVariant(this.value)">{variant_options}</select>
@@ -1501,6 +1572,10 @@ def render_dashboard_html() -> str:
 
 <div id="tab-stats" style="display:none">
 {stats_html}
+</div>
+
+<div id="tab-inbox" style="display:none">
+{inbox_tab_html}
 </div>
 
 {answers_html}
@@ -2201,10 +2276,41 @@ async function deleteSkills() {{
 function showTab(name, event) {{
   const jobs = document.getElementById('tab-jobs');
   const stats = document.getElementById('tab-stats');
+  const inbox = document.getElementById('tab-inbox');
   if (jobs) jobs.style.display = (name === 'jobs') ? '' : 'none';
   if (stats) stats.style.display = (name === 'stats') ? '' : 'none';
+  if (inbox) inbox.style.display = (name === 'inbox') ? '' : 'none';
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
   try {{ localStorage.setItem(TAB_KEY, name); }} catch (e) {{}}
+}}
+
+async function scanAppliedInbox(btn) {{
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Scanning... (this reads Gmail)';
+  try {{
+    const d = await postJSON('/inbox/scan-all', {{limit: 25}});
+    if (d.ok) {{
+      await refreshInboxTab();
+      alert('Scanned ' + d.scanned + ' of ' + d.total + ' applied jobs' +
+            (d.errors ? ' (' + d.errors + ' errors)' : '') + '.');
+    }} else {{
+      alert('Scan failed: ' + (d.error || 'unknown'));
+    }}
+  }} catch (e) {{
+    alert('Could not reach the dashboard server.');
+  }} finally {{
+    btn.disabled = false;
+    btn.textContent = original;
+  }}
+}}
+
+async function refreshInboxTab() {{
+  try {{
+    const res = await fetch('/inbox-tab');
+    const d = await res.json();
+    if (d.ok) document.getElementById('tab-inbox').innerHTML = d.html;
+  }} catch (e) {{}}
 }}
 
 function quickStatus(val) {{
@@ -2954,6 +3060,9 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                     "generated_at": s.get("generated_at"),
                 })
                 return
+            if parsed.path == "/inbox-tab":
+                self._json({"ok": True, "html": _render_inbox_tab_html()})
+                return
             if parsed.path not in ("/", "/index.html"):
                 self._send(404, b"Not found", "text/plain")
                 return
@@ -3260,6 +3369,17 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                     return
                 try:
                     result = scan_and_cache(dict(row))
+                except GmailNotConfigured as exc:
+                    self._json({"ok": False, "error": str(exc)})
+                    return
+                except Exception as exc:  # pragma: no cover - defensive
+                    self._json({"ok": False, "error": str(exc)})
+                    return
+                self._json({"ok": True, **result})
+            elif path == "/inbox/scan-all":
+                from applypilot.inbox import GmailNotConfigured, scan_applied_jobs
+                try:
+                    result = scan_applied_jobs(limit=int(data.get("limit") or 25))
                 except GmailNotConfigured as exc:
                     self._json({"ok": False, "error": str(exc)})
                     return

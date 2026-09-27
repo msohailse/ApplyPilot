@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -238,15 +239,98 @@ def summarize_thread(job: dict, messages: list[dict]) -> str:
     )
 
 
+# ── Categorisation ───────────────────────────────────────────────────────
+
+# Tab groups, in display order: key -> (label, job status to auto-assign or None)
+CATEGORY_META: dict[str, tuple[str, str | None]] = {
+    "offer": ("Offers", "offer"),
+    "interview": ("Interviewing", "interviewing"),
+    "assessment": ("Assessments / tests", None),
+    "screening": ("Screening", None),
+    "waiting": ("In progress (waiting)", None),
+    "rejected": ("Rejected", "rejected"),
+    "other": ("Other", None),
+    "none": ("No reply yet", None),
+    "unscanned": ("Not scanned yet", None),
+}
+CATEGORY_ORDER = list(CATEGORY_META)
+
+
+def _category_from_summary(summary: str) -> str:
+    """Map an email-thread summary to a coarse category (theme of the mail)."""
+    text = (summary or "").lower()
+    if "no matching emails" in text:
+        return "none"
+    # The summarizer emits a "STATUS: ..." line; trust that first.
+    m = re.search(r"status:\s*(.+)", summary or "", re.IGNORECASE)
+    status = (m.group(1) if m else text).lower()
+    if "offer" in status:
+        return "offer"
+    if "reject" in status or "not moving forward" in status or "not selected" in status:
+        return "rejected"
+    if "interview" in status:
+        return "interview"
+    if any(w in status for w in ("assessment", "test task", "coding challenge", "take-home", "hackerrank")):
+        return "assessment"
+    if "screen" in status or "recruiter" in status:
+        return "screening"
+    if "waiting" in status or "applied" in status or "under review" in status:
+        return "waiting"
+    return "other"
+
+
 # ── Public API ───────────────────────────────────────────────────────────
 
 def scan_and_cache(job: dict, max_results: int = 8) -> dict:
-    """Fetch the company thread, summarize it, and cache the result on the job."""
+    """Fetch the company thread, summarize it, categorize, and cache it."""
     messages = fetch_company_messages(job, max_results=max_results)
     summary = summarize_thread(job, messages)
+    category = _category_from_summary(summary)
+    if not messages:
+        category = "none"
     message_ids = ",".join(m["id"] for m in messages)
-    save_inbox_cache(job["url"], message_ids, "", summary, resolve_model("inbox") or "")
-    return {"messages": len(messages), "summary": summary}
+    save_inbox_cache(
+        job["url"], message_ids, "", summary, resolve_model("inbox") or "", category,
+    )
+
+    # Auto-assign the application status from the email theme.
+    status = CATEGORY_META.get(category, (None, None))[1]
+    if status and job.get("url"):
+        try:
+            from applypilot.database import set_job_status
+
+            set_job_status(job["url"], status)
+        except Exception:  # noqa: BLE001 - never fail a scan over this
+            log.debug("Could not auto-assign status %s for %s", status, job.get("url"))
+
+    return {"messages": len(messages), "summary": summary, "category": category}
+
+
+def scan_applied_jobs(limit: int = 20, max_results: int = 8) -> dict:
+    """Scan the most recent applied jobs' inboxes and categorize them."""
+    from applypilot.database import get_connection
+
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT url, title, site, company, location, application_url, apply_status "
+        "FROM jobs WHERE apply_status IN "
+        "('applied','success','interviewing','offer','rejected','no_deal') "
+        "ORDER BY COALESCE(applied_at, '') DESC LIMIT ?",
+        (int(limit),),
+    ).fetchall()
+
+    scanned = 0
+    errors = 0
+    for row in rows:
+        try:
+            scan_and_cache(dict(row), max_results=max_results)
+            scanned += 1
+        except GmailNotConfigured:
+            raise
+        except Exception as exc:  # noqa: BLE001 - keep going
+            errors += 1
+            log.warning("Inbox scan failed for %s: %s", row["url"], exc)
+    return {"scanned": scanned, "errors": errors, "total": len(rows)}
 
 
 def cached_summary(job_url: str) -> dict | None:

@@ -142,6 +142,7 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             message_ids  TEXT,
             thread_text  TEXT,
             summary      TEXT,
+            category     TEXT,
             model        TEXT,
             created_at   TEXT
         )
@@ -150,6 +151,7 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
 
     # Run migrations for any columns added after initial schema
     ensure_columns(conn)
+    _ensure_inbox_columns(conn)
 
     return conn
 
@@ -637,6 +639,20 @@ def get_study_jobs(conn=None) -> list[dict]:
 
 # ── Gmail inbox insights cache ───────────────────────────────────────────
 
+def _ensure_inbox_columns(conn: sqlite3.Connection | None = None) -> list[str]:
+    """Add any missing columns to the ``inbox_cache`` table."""
+    if conn is None:
+        conn = get_connection()
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(inbox_cache)").fetchall()}
+    added = []
+    if "category" not in existing:
+        conn.execute("ALTER TABLE inbox_cache ADD COLUMN category TEXT")
+        added.append("category")
+    if added:
+        conn.commit()
+    return added
+
+
 def get_inbox_cache(url: str, conn=None) -> dict | None:
     """Return the cached inbox insight for a job, or None."""
     conn = conn or get_connection()
@@ -659,18 +675,29 @@ def get_inbox_summaries(conn=None) -> dict[str, str]:
 
 def save_inbox_cache(
     url: str, message_ids: str, thread_text: str, summary: str, model: str,
+    category: str = "",
 ) -> None:
     """Insert or replace the cached inbox insight for a job."""
     conn = get_connection()
     conn.execute(
-        "INSERT INTO inbox_cache (url, message_ids, thread_text, summary, model, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
+        "INSERT INTO inbox_cache (url, message_ids, thread_text, summary, category, model, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(url) DO UPDATE SET message_ids=excluded.message_ids, "
         "thread_text=excluded.thread_text, summary=excluded.summary, "
-        "model=excluded.model, created_at=excluded.created_at",
-        (url, message_ids, thread_text, summary, model, datetime.now(timezone.utc).isoformat()),
+        "category=excluded.category, model=excluded.model, created_at=excluded.created_at",
+        (
+            url, message_ids, thread_text, summary, category or "", model,
+            datetime.now(timezone.utc).isoformat(),
+        ),
     )
     conn.commit()
+
+
+def get_inbox_rows(conn=None) -> dict[str, dict]:
+    """Return {job_url: inbox_cache_row} for all cached insights."""
+    conn = conn or get_connection()
+    rows = conn.execute("SELECT * FROM inbox_cache").fetchall()
+    return {r["url"]: dict(r) for r in rows}
 
 
 def delete_inbox_cache(url: str) -> None:
