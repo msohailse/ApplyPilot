@@ -31,6 +31,7 @@ from applypilot.database import (
     ensure_columns, get_connection, get_inbox_summaries, get_study_jobs,
 )
 from applypilot.enrichment.classify import backfill_classifications, backfill_company_from_site
+from applypilot.links import load_links
 from applypilot.todos import load_todos
 from applypilot.answers import load_answers
 
@@ -131,8 +132,8 @@ def _render_todos_html() -> str:
         tag_options += f'<option value="{escape(tag)}">{escape(tag)}</option>'
     tag_datalist = "".join(f'<option value="{escape(tag)}"></option>' for tag in tags)
 
-    return f"""<div class="todo-panel">
-  <h3>Todo</h3>
+    return f"""<details class="todo-panel" open>
+  <summary>Todo</summary>
   <div class="todo-filter-row">
     <span class="todo-filter-label">Filter by tag:</span>
     <select id="todo-tag-filter" class="filter-select" onchange="filterTodos(this.value)">{tag_options}</select>
@@ -145,7 +146,60 @@ def _render_todos_html() -> str:
     <button class="todo-add-btn" onclick="addTodo()">Add</button>
   </div>
   <datalist id="todo-tag-list">{tag_datalist}</datalist>
-</div>"""
+</details>"""
+
+
+def _render_links_html() -> str:
+    """Render the links/shortcuts panel (name + url + optional tag)."""
+    links = load_links()
+
+    tags: list[str] = []
+    for l in links:
+        tag = (l.get("tag") or "").strip()
+        if tag and tag not in tags:
+            tags.append(tag)
+    tags.sort(key=str.lower)
+
+    items = ""
+    for l in links:
+        lid = escape(l.get("id", ""))
+        name = escape(l.get("name", "") or "")
+        url = escape(l.get("url", "") or "")
+        tag = (l.get("tag") or "").strip()
+        body = (
+            f'<a href="{url}" target="_blank" rel="noopener">{name}</a>'
+            if url else f"<span>{name}</span>"
+        )
+        tag_html = f'<span class="todo-tag">{escape(tag)}</span>' if tag else ""
+        items += (
+            f'<li class="link-item" data-id="{lid}" data-tag="{escape(tag)}">'
+            f'<div class="todo-main">{body}{tag_html}</div>'
+            f'<button class="todo-del" title="Delete" onclick="deleteLink(this)">×</button>'
+            f"</li>"
+        )
+    if not items:
+        items = '<li class="todo-empty">No links yet.</li>'
+
+    tag_options = '<option value="__all">All tags</option>'
+    for tag in tags:
+        tag_options += f'<option value="{escape(tag)}">{escape(tag)}</option>'
+    tag_datalist = "".join(f'<option value="{escape(tag)}"></option>' for tag in tags)
+
+    return f"""<details class="todo-panel links-panel" open>
+  <summary>Links &amp; shortcuts</summary>
+  <div class="todo-filter-row">
+    <span class="todo-filter-label">Filter by tag:</span>
+    <select id="link-tag-filter" class="filter-select" onchange="filterLinks(this.value)">{tag_options}</select>
+  </div>
+  <ul class="todo-list" id="link-list">{items}</ul>
+  <div class="todo-add">
+    <input id="link-name" class="todo-input" placeholder="Name..." onkeydown="if(event.key==='Enter')addLink()">
+    <input id="link-url" class="todo-input" placeholder="https://..." onkeydown="if(event.key==='Enter')addLink()">
+    <input id="link-tag" class="todo-input todo-tag-input" list="link-tag-list" placeholder="tag (optional)" onkeydown="if(event.key==='Enter')addLink()">
+    <button class="todo-add-btn" onclick="addLink()">Add</button>
+  </div>
+  <datalist id="link-tag-list">{tag_datalist}</datalist>
+</details>"""
 
 
 def _job_files_html(job: dict) -> str:
@@ -669,6 +723,7 @@ def render_dashboard_html() -> str:
         mode_buttons += f'<button class="filter-btn mode-btn" onclick="filterWorkMode(\'{mv_js}\', event)">{escape(mv)}</button>'
 
     todos_html = _render_todos_html()
+    links_html = _render_links_html()
     study_html = _render_study_html()
     answers_html = _render_answers_html()
 
@@ -870,6 +925,14 @@ def render_dashboard_html() -> str:
   /* Todo panel */
   .todo-panel {{ background: #1e293b; border-radius: 12px; padding: 1.25rem; margin-bottom: 2rem; border-left: 3px solid #60a5fa; }}
   .todo-panel h3 {{ font-size: 1rem; margin-bottom: 0.75rem; color: #94a3b8; }}
+  .todo-panel > summary {{ cursor: pointer; font-size: 1rem; font-weight: 700; color: #94a3b8; margin-bottom: 0.75rem; list-style: none; }}
+  .todo-panel > summary::-webkit-details-marker {{ display: none; }}
+  .todo-panel > summary::before {{ content: "▸"; display: inline-block; width: 1rem; color: #64748b; }}
+  .todo-panel[open] > summary::before {{ content: "▾"; }}
+  .link-item {{ display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; font-size: 0.9rem; }}
+  .link-item a {{ color: #93c5fd; text-decoration: none; }}
+  .link-item a:hover {{ text-decoration: underline; }}
+  .links-panel {{ border-left-color: #f59e0b; }}
   .todo-list {{ list-style: none; margin-bottom: 0.75rem; }}
   .todo-item {{ display: flex; align-items: center; gap: 0.5rem; padding: 0.3rem 0; font-size: 0.9rem; }}
   .todo-item input[type=checkbox] {{ cursor: pointer; width: 15px; height: 15px; }}
@@ -1257,6 +1320,8 @@ def render_dashboard_html() -> str:
 <p class="subtitle">{total} jobs &middot; {scored} scored &middot; {high_fit} strong matches (7+)</p>
 
 {todos_html}
+
+{links_html}
 
 {study_html}
 
@@ -2174,6 +2239,66 @@ async function deleteTodo(el) {{
   }} catch (e) {{ alert('Could not reach the dashboard server.'); }}
 }}
 
+function _linkLi(item) {{
+  const li = document.createElement('li');
+  li.className = 'link-item';
+  li.dataset.id = item.id;
+  li.dataset.tag = item.tag || '';
+  const body = item.url
+    ? '<a href="' + escapeHtml(item.url) + '" target="_blank" rel="noopener">' + escapeHtml(item.name) + '</a>'
+    : '<span>' + escapeHtml(item.name) + '</span>';
+  const tagHtml = item.tag ? '<span class="todo-tag">' + escapeHtml(item.tag) + '</span>' : '';
+  li.innerHTML = '<div class="todo-main">' + body + tagHtml + '</div>' +
+    '<button class="todo-del" title="Delete" onclick="deleteLink(this)">×</button>';
+  return li;
+}}
+
+function _addLinkTagOption(tag) {{
+  const sel = document.getElementById('link-tag-filter');
+  if (sel && ![...sel.options].some(o => o.value === tag)) {{
+    const o = document.createElement('option'); o.value = tag; o.textContent = tag; sel.appendChild(o);
+  }}
+  const dl = document.getElementById('link-tag-list');
+  if (dl && ![...dl.options].some(o => o.value === tag)) {{
+    const o = document.createElement('option'); o.value = tag; dl.appendChild(o);
+  }}
+}}
+
+function filterLinks(val) {{
+  const want = val || '__all';
+  document.querySelectorAll('.link-item').forEach(li => {{
+    const tag = li.dataset.tag || '';
+    li.style.display = (want === '__all' || tag === want) ? '' : 'none';
+  }});
+}}
+
+async function addLink() {{
+  const n = document.getElementById('link-name');
+  const u = document.getElementById('link-url');
+  const g = document.getElementById('link-tag');
+  const name = (n.value || '').trim();
+  if (!name) return;
+  const tag = (g ? g.value : '').trim();
+  try {{
+    const data = await postJSON('/link/add', {{name: name, url: (u.value || '').trim(), tag: tag}});
+    if (data.ok && data.item) {{
+      document.getElementById('link-list').appendChild(_linkLi(data.item));
+      if (data.item.tag) _addLinkTagOption(data.item.tag);
+      n.value = ''; u.value = ''; if (g) g.value = '';
+      const sel = document.getElementById('link-tag-filter');
+      filterLinks(sel ? sel.value : '__all');
+    }} else {{ alert('Failed: ' + (data.error || 'unknown')); }}
+  }} catch (e) {{ alert('Could not reach the dashboard server.'); }}
+}}
+
+async function deleteLink(el) {{
+  const li = el.closest('.link-item');
+  try {{
+    const data = await postJSON('/link/delete', {{id: li.dataset.id}});
+    if (data.ok) li.remove();
+  }} catch (e) {{ alert('Could not reach the dashboard server.'); }}
+}}
+
 async function saveNote(input) {{
   const card = input.closest('.job-card');
   const url = card ? card.dataset.url : '';
@@ -2689,6 +2814,18 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
             elif path == "/todo/delete":
                 from applypilot.todos import delete_todo
                 delete_todo(data.get("id") or "")
+                self._json({"ok": True})
+            elif path == "/link/add":
+                from applypilot.links import add_link
+                name = (data.get("name") or "").strip()
+                if not name:
+                    self._json({"ok": False, "error": "name required"})
+                    return
+                links = add_link(name, data.get("url"), data.get("tag"))
+                self._json({"ok": True, "item": links[-1]})
+            elif path == "/link/delete":
+                from applypilot.links import delete_link
+                delete_link(data.get("id") or "")
                 self._json({"ok": True})
             elif path == "/note":
                 url = data.get("url")
