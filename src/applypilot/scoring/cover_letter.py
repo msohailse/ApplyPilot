@@ -13,7 +13,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_env, load_profile
+from applypilot.config import (
+    COVER_LETTER_DIR,
+    RESUME_PATH,
+    get_resume_path,
+    load_env,
+    load_profile,
+)
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
@@ -150,11 +156,15 @@ Start DIRECTLY with "Dear Hiring Manager," and end with the name."""
     return prompt
 
 
-def _prefix_for(job: dict) -> str:
-    """Build the ``Company_Title`` filename prefix for cover-letter outputs."""
+def _prefix_for(job: dict, variant: str | None = None) -> str:
+    """Build the ``[variant_]Company_Title`` prefix for cover-letter outputs."""
     safe_title = re.sub(r"[^\w\s-]", "", job.get("title") or "role")[:50].strip().replace(" ", "_")
     safe_site = re.sub(r"[^\w\s-]", "", job.get("site") or "company")[:20].strip().replace(" ", "_")
-    return f"{safe_site}_{safe_title}"
+    base = f"{safe_site}_{safe_title}"
+    if variant:
+        safe_variant = re.sub(r"[^\w-]", "", variant)[:20]
+        return f"{safe_variant}_{base}"
+    return base
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -252,7 +262,8 @@ def generate_cover_letter(
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
 def run_cover_letters(min_score: int = 7, limit: int = 20,
-                      validation_mode: str = "normal") -> dict:
+                      validation_mode: str = "normal",
+                      variant: str | None = None) -> dict:
     """Generate cover letters for high-scoring jobs that have tailored resumes.
 
     Args:
@@ -263,8 +274,8 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     Returns:
         {"generated": int, "errors": int, "elapsed": float}
     """
-    profile = load_profile()
-    resume_text = RESUME_PATH.read_text(encoding="utf-8")
+    profile = load_profile(variant)
+    resume_text = get_resume_path(variant).read_text(encoding="utf-8")
     conn = get_connection()
 
     # Fetch jobs that have tailored resumes but no cover letter yet
@@ -305,9 +316,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
                                           validation_mode=validation_mode)
 
             # Build safe filename prefix
-            safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "_")
-            safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
-            prefix = f"{safe_site}_{safe_title}"
+            prefix = _prefix_for(job, variant)
 
             cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
             cl_path.write_text(letter, encoding="utf-8")
@@ -373,6 +382,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
 
 def generate_one_cover_letter(
     job: dict, validation_mode: str = "normal", extra: str = "",
+    variant: str | None = None,
 ) -> dict:
     """Generate and persist a cover letter for a single job, on demand.
 
@@ -388,20 +398,20 @@ def generate_one_cover_letter(
         {"path": str, "pdf_path": str | None, "prefix": str}
     """
     load_env()
-    profile = load_profile()
+    profile = load_profile(variant)
 
     tailored = job.get("tailored_resume_path")
     if tailored and Path(tailored).exists():
         resume_text = Path(tailored).read_text(encoding="utf-8")
     else:
-        resume_text = RESUME_PATH.read_text(encoding="utf-8")
+        resume_text = get_resume_path(variant).read_text(encoding="utf-8")
 
     letter = generate_cover_letter(
         resume_text, job, profile, validation_mode=validation_mode, extra=extra,
     )
 
     COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
-    prefix = _prefix_for(job)
+    prefix = _prefix_for(job, variant)
     cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
     cl_path.write_text(letter, encoding="utf-8")
 

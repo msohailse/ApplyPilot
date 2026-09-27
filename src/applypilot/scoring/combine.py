@@ -38,11 +38,15 @@ _PDFLATEX_FALLBACKS = (
 )
 
 
-def _safe_prefix(job: dict) -> str:
-    """Build a filesystem-safe ``Company_Title`` prefix for output files."""
+def _safe_prefix(job: dict, variant: str | None = None) -> str:
+    """Build a filesystem-safe ``[variant_]Company_Title`` prefix for outputs."""
     safe_title = re.sub(r"[^\w\s-]", "", job.get("title") or "role")[:50].strip().replace(" ", "_")
     safe_site = re.sub(r"[^\w\s-]", "", job.get("site") or "company")[:20].strip().replace(" ", "_")
-    return f"{safe_site}_{safe_title}"
+    base = f"{safe_site}_{safe_title}"
+    if variant:
+        safe_variant = re.sub(r"[^\w-]", "", variant)[:20]
+        return f"{safe_variant}_{base}"
+    return base
 
 
 def _extract_latex(raw: str) -> str:
@@ -164,7 +168,7 @@ def _build_user_prompt(base_tex: str, tailored_txt: str, job: dict, extra: str) 
     return "\n".join(parts)
 
 
-def combine_resume(job: dict, extra: str = "") -> dict:
+def combine_resume(job: dict, extra: str = "", variant: str | None = None) -> dict:
     """Render a job's existing tailored resume into the base LaTeX template.
 
     Args:
@@ -192,9 +196,9 @@ def combine_resume(job: dict, extra: str = "") -> dict:
         from applypilot.scoring.tailor import tailor_one_job
 
         log.info("No tailored resume for %r yet; tailoring on demand...", job.get("title"))
-        tailored_path = tailor_one_job(job, validation_mode="normal")["path"]
+        tailored_path = tailor_one_job(job, validation_mode="normal", variant=variant)["path"]
 
-    base = get_base_resume_tex()
+    base = get_base_resume_tex(variant)
     if base is None:
         # No LaTeX master available: fall back to ApplyPilot's standard
         # tailored-text -> PDF rendering so the action still succeeds.
@@ -208,7 +212,7 @@ def combine_resume(job: dict, extra: str = "") -> dict:
         return {
             "tex_path": None,
             "pdf_path": str(pdf),
-            "prefix": _safe_prefix(job),
+            "prefix": _safe_prefix(job, variant),
             "fallback": True,
         }
 
@@ -235,7 +239,7 @@ def combine_resume(job: dict, extra: str = "") -> dict:
         raise ValueError("Generated LaTeX is unexpectedly large; aborting.")
 
     TAILORED_DIR.mkdir(parents=True, exist_ok=True)
-    prefix = _safe_prefix(job)
+    prefix = _safe_prefix(job, variant)
     tex_path = TAILORED_DIR / f"{prefix}.tex"
     tex_path.write_text(latex, encoding="utf-8")
 

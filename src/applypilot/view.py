@@ -19,7 +19,13 @@ from urllib.parse import quote, urlparse, parse_qs
 
 from rich.console import Console
 
-from applypilot.config import APP_DIR, DB_PATH, TAILORED_DIR, COVER_LETTER_DIR
+from applypilot.config import (
+    APP_DIR,
+    DB_PATH,
+    TAILORED_DIR,
+    COVER_LETTER_DIR,
+    list_resume_variants,
+)
 from applypilot.database import (
     ensure_columns, get_connection, get_inbox_summaries, get_study_jobs,
 )
@@ -642,6 +648,10 @@ def render_dashboard_html() -> str:
         f'<option value="{escape(c)}"></option>' for c in company_values
     )
 
+    variant_options = '<option value="">Default</option>'
+    for _v in list_resume_variants():
+        variant_options += f'<option value="{escape(_v)}">{escape(_v)}</option>'
+
     mode_buttons = '<button class="filter-btn mode-btn active" onclick="filterWorkMode(\'any\', event)">Any</button>'
     for mv in mode_values:
         mv_js = mv.lower().replace("'", "\\'")
@@ -1008,6 +1018,9 @@ def render_dashboard_html() -> str:
     border: 1px solid #1e293b; border-radius: 10px; }}
   .topnav-brand {{ font-weight: 800; font-size: 1rem; color: #93c5fd; margin-right: auto;
     letter-spacing: 0.3px; }}
+  .nav-variant {{ display: inline-flex; align-items: center; gap: 0.35rem;
+    font-size: 0.75rem; color: #94a3b8; }}
+  .nav-variant .filter-select {{ padding: 0.2rem 0.4rem; font-size: 0.75rem; }}
   .tab-btn {{ background: #1e293b; border: 1px solid #334155; color: #cbd5e1;
     padding: 0.45rem 1.1rem; border-radius: 8px; cursor: pointer; font-size: 0.85rem; }}
   .tab-btn:hover {{ border-color: #2a7ab5; color: #fff; }}
@@ -1105,6 +1118,10 @@ def render_dashboard_html() -> str:
   <span class="topnav-brand">ApplyPilot</span>
   <button class="tab-btn active" data-tab="jobs" onclick="showTab('jobs', event)">Jobs</button>
   <button class="tab-btn" data-tab="stats" onclick="showTab('stats', event)">Report</button>
+  <span class="nav-variant">
+    <label for="resume-variant">Resume:</label>
+    <select id="resume-variant" class="filter-select" onchange="saveVariant(this.value)">{variant_options}</select>
+  </span>
 </nav>
 
 <div id="tab-jobs">
@@ -1219,6 +1236,15 @@ let siteFilter = '';
 // generating a document -- keeps you exactly where you were.
 const FILTER_KEY = 'applypilot.filters.v1';
 const TAB_KEY = 'applypilot.tab.v1';
+const VARIANT_KEY = 'applypilot.variant.v1';
+
+function currentVariant() {{
+  const el = document.getElementById('resume-variant');
+  return el ? el.value : '';
+}}
+function saveVariant(v) {{
+  try {{ localStorage.setItem(VARIANT_KEY, v || ''); }} catch (e) {{}}
+}}
 
 function saveFilters() {{
   try {{
@@ -1447,7 +1473,7 @@ async function combineResume(btn) {{
   btn.disabled = true;
   btn.textContent = 'Generating...';
   try {{
-    const data = await postJSON('/combine', {{url: url, extra: extra}});
+    const data = await postJSON('/combine', {{url: url, extra: extra, variant: currentVariant()}});
     if (data.ok) {{
       if (data.fallback) alert('No LaTeX base found - used the default PDF pipeline.');
       btn.textContent = 'Generated';
@@ -1499,7 +1525,7 @@ async function generateCoverLetter(btn) {{
   btn.disabled = true;
   btn.textContent = 'Generating...';
   try {{
-    const data = await postJSON('/cover', {{url: url, extra: extra}});
+    const data = await postJSON('/cover', {{url: url, extra: extra, variant: currentVariant()}});
     if (data.ok) {{
       btn.textContent = 'Generated';
       refreshCard(card);
@@ -2059,6 +2085,11 @@ function applyFilters() {{
 
 restoreFilters();
 restoreFilterUI();
+try {{
+  const _v = localStorage.getItem(VARIANT_KEY) || '';
+  const _el = document.getElementById('resume-variant');
+  if (_el && _v) _el.value = _v;
+}} catch (e) {{}}
 try {{ if (localStorage.getItem(TAB_KEY) === 'stats') showTab('stats'); }} catch (e) {{}}
 applyFilters();
 </script>
@@ -2332,7 +2363,11 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                     self._json({"ok": False, "error": "job not found"})
                     return
                 try:
-                    result = combine_resume(dict(row), extra=(data.get("extra") or ""))
+                    result = combine_resume(
+                        dict(row),
+                        extra=(data.get("extra") or ""),
+                        variant=(data.get("variant") or None),
+                    )
                 except Exception as exc:  # pragma: no cover - defensive
                     self._json({"ok": False, "error": str(exc)})
                     return
@@ -2368,7 +2403,9 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                     return
                 try:
                     result = generate_one_cover_letter(
-                        dict(row), extra=str(data.get("extra") or ""),
+                        dict(row),
+                        extra=str(data.get("extra") or ""),
+                        variant=(data.get("variant") or None),
                     )
                 except Exception as exc:  # pragma: no cover - defensive
                     self._json({"ok": False, "error": str(exc)})

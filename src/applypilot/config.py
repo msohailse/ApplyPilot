@@ -13,6 +13,9 @@ DB_PATH = APP_DIR / "applypilot.db"
 PROFILE_PATH = APP_DIR / "profile.json"
 RESUME_PATH = APP_DIR / "resume.txt"
 RESUME_PDF_PATH = APP_DIR / "resume.pdf"
+# Resume variants: one subdir per variant, each with profile.json (overrides),
+# resume.txt (base text) and optionally resume.tex (base LaTeX master).
+RESUME_VARIANTS_DIR = APP_DIR / "resume_variants"
 SEARCH_CONFIG_PATH = APP_DIR / "searches.yaml"
 ENV_PATH = APP_DIR / ".env"
 
@@ -128,7 +131,82 @@ def _looks_like_latex(path: Path) -> bool:
     return "\\documentclass" in text and "\\end{document}" in text
 
 
-def get_base_resume_tex() -> Path | None:
+def resolve_variant(variant: str | None = None) -> str | None:
+    """Resolve the active resume variant (explicit arg wins, else env)."""
+    if variant:
+        return variant
+    load_env()
+    return os.environ.get("APPLYPILOT_RESUME_VARIANT", "").strip() or None
+
+
+def list_resume_variants() -> list[str]:
+    """Names of available resume variants (subdirs of RESUME_VARIANTS_DIR)."""
+    if not RESUME_VARIANTS_DIR.exists():
+        return []
+    return sorted(p.name for p in RESUME_VARIANTS_DIR.iterdir() if p.is_dir())
+
+
+def _variant_source_url(variant: str) -> str:
+    """Where to fetch a variant's base files: profile.json ``source_url`` or the
+    default hosted location ``https://msohail.work/resume/<variant>/``."""
+    import json
+
+    prof_path = RESUME_VARIANTS_DIR / variant / "profile.json"
+    if prof_path.exists():
+        try:
+            url = (json.loads(prof_path.read_text(encoding="utf-8")).get("source_url") or "")
+            if url.strip():
+                return url.strip().rstrip("/")
+        except (ValueError, OSError):
+            pass
+    return f"https://msohail.work/resume/{variant}"
+
+
+def ensure_variant_files(variant: str | None) -> None:
+    """Download a variant's base files (resume.txt/tex/pdf, res.cls) if missing.
+
+    Best-effort and cached: existing files are never re-downloaded here.
+    """
+    if not variant:
+        return
+    import urllib.request
+
+    d = RESUME_VARIANTS_DIR / variant
+    d.mkdir(parents=True, exist_ok=True)
+    base = _variant_source_url(variant)
+    for fname in ("resume.txt", "resume.tex", "resume.pdf", "res.cls"):
+        dest = d / fname
+        if dest.exists():
+            continue
+        try:
+            urllib.request.urlretrieve(f"{base}/{fname}", dest)
+        except Exception:  # noqa: BLE001 - offline / not published yet
+            pass
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge ``override`` into a copy of ``base``."""
+    out = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def get_resume_path(variant: str | None = None) -> Path:
+    """Base resume ``.txt`` for a variant (falls back to the default one)."""
+    variant = resolve_variant(variant)
+    if variant:
+        ensure_variant_files(variant)
+        candidate = RESUME_VARIANTS_DIR / variant / "resume.txt"
+        if candidate.exists():
+            return candidate
+    return RESUME_PATH
+
+
+def get_base_resume_tex(variant: str | None = None) -> Path | None:
     """Resolve the master LaTeX resume template used by "Combine Resume".
 
     Resolution order (first existing wins):
@@ -142,7 +220,14 @@ def get_base_resume_tex() -> Path | None:
     Returns:
         Path to the base .tex, or None if none is configured/found.
     """
+    variant = resolve_variant(variant)
     load_env()
+
+    if variant:
+        ensure_variant_files(variant)
+        variant_tex = RESUME_VARIANTS_DIR / variant / "resume.tex"
+        if variant_tex.exists():
+            return variant_tex
 
     candidates: list[Path] = []
     env_path = os.environ.get("APPLYPILOT_BASE_RESUME_TEX", "").strip()
@@ -187,14 +272,30 @@ def get_gmail_config() -> dict:
     }
 
 
-def load_profile() -> dict:
-    """Load user profile from ~/.applypilot/profile.json."""
+def load_profile(variant: str | None = None) -> dict:
+    """Load user profile from ~/.applypilot/profile.json.
+
+    When ``variant`` is given, ``resume_variants/<variant>/profile.json`` is
+    deep-merged on top (e.g. to swap phone/location for a different country).
+    """
     import json
     if not PROFILE_PATH.exists():
         raise FileNotFoundError(
             f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first."
         )
-    return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    variant = resolve_variant(variant)
+    if variant:
+        ensure_variant_files(variant)
+        vpath = RESUME_VARIANTS_DIR / variant / "profile.json"
+        if vpath.exists():
+            try:
+                profile = _deep_merge(
+                    profile, json.loads(vpath.read_text(encoding="utf-8"))
+                )
+            except (ValueError, OSError):
+                pass
+    return profile
 
 
 def load_search_config() -> dict:

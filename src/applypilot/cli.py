@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import typer
@@ -97,9 +98,15 @@ def run(
             "lenient: banned words ignored, LLM judge skipped (fastest, fewest API calls)."
         ),
     ),
+    variant: str = typer.Option(
+        "", "--variant", "-V",
+        help="Resume variant name (folder under ~/.applypilot/resume_variants).",
+    ),
 ) -> None:
     """Run pipeline stages: discover, enrich, score, tailor, cover, pdf."""
     _bootstrap()
+    if variant:
+        os.environ["APPLYPILOT_RESUME_VARIANT"] = variant
 
     from applypilot.pipeline import run_pipeline
 
@@ -352,6 +359,10 @@ def combine(
         None, "--instructions", "-i",
         help="Optional extra instructions to guide the LLM.",
     ),
+    variant: Optional[str] = typer.Option(
+        None, "--variant", "-V",
+        help="Resume variant (folder under ~/.applypilot/resume_variants).",
+    ),
 ) -> None:
     """Render a job's existing tailored resume into your LaTeX master and compile a PDF.
 
@@ -383,7 +394,7 @@ def combine(
         "[dim](tailoring on demand if needed)[/dim]"
     )
     try:
-        result = combine_resume(job, extra=instructions or "")
+        result = combine_resume(job, extra=instructions or "", variant=variant)
     except Exception as exc:  # noqa: BLE001 - user-facing CLI: report and exit
         console.print(f"[red]Combine failed:[/red] {exc}")
         raise typer.Exit(1)
@@ -406,6 +417,10 @@ def cover_letter(
     instructions: str = typer.Option(
         "", "--instructions", "-i",
         help="Optional one-off instructions for this letter (e.g. 'emphasize the Kubernetes work').",
+    ),
+    variant: Optional[str] = typer.Option(
+        None, "--variant", "-V",
+        help="Resume variant (folder under ~/.applypilot/resume_variants).",
     ),
 ) -> None:
     """Generate a cover letter for a single job, on demand.
@@ -432,7 +447,7 @@ def cover_letter(
         f"[dim]({job.get('site') or 'unknown'})[/dim]..."
     )
     try:
-        result = generate_one_cover_letter(job, extra=instructions)
+        result = generate_one_cover_letter(job, extra=instructions, variant=variant)
     except Exception as exc:  # noqa: BLE001 - user-facing CLI: report and exit
         console.print(f"[red]Cover letter failed:[/red] {exc}")
         raise typer.Exit(1)

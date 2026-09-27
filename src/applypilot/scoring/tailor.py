@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
+from applypilot.config import RESUME_PATH, TAILORED_DIR, get_resume_path, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
@@ -32,11 +32,15 @@ log = logging.getLogger(__name__)
 MAX_ATTEMPTS = 5  # max cross-run retries before giving up
 
 
-def _prefix_for(job: dict) -> str:
-    """Build the ``Company_Title`` filename prefix used for tailored outputs."""
+def _prefix_for(job: dict, variant: str | None = None) -> str:
+    """Build the ``[variant_]Company_Title`` filename prefix for tailored outputs."""
     safe_title = re.sub(r"[^\w\s-]", "", job.get("title") or "role")[:50].strip().replace(" ", "_")
     safe_site = re.sub(r"[^\w\s-]", "", job.get("site") or "company")[:20].strip().replace(" ", "_")
-    return f"{safe_site}_{safe_title}"
+    base = f"{safe_site}_{safe_title}"
+    if variant:
+        safe_variant = re.sub(r"[^\w-]", "", variant)[:20]
+        return f"{safe_variant}_{base}"
+    return base
 
 
 # ── Prompt Builders (profile-driven) ──────────────────────────────────────
@@ -473,7 +477,8 @@ def tailor_resume(
 
 # ── On-demand (single job) ───────────────────────────────────────────────
 
-def tailor_one_job(job: dict, validation_mode: str = "normal") -> dict:
+def tailor_one_job(job: dict, validation_mode: str = "normal",
+                   variant: str | None = None) -> dict:
     """Tailor and persist a single job's resume, on demand.
 
     Per-job equivalent of ``run_tailoring`` used by Combine Resume so a job can
@@ -483,13 +488,13 @@ def tailor_one_job(job: dict, validation_mode: str = "normal") -> dict:
     Returns:
         {"path": str, "status": str, "attempts": int, "report": dict}
     """
-    profile = load_profile()
-    resume_text = RESUME_PATH.read_text(encoding="utf-8")
+    profile = load_profile(variant)
+    resume_text = get_resume_path(variant).read_text(encoding="utf-8")
 
     tailored, report = tailor_resume(resume_text, job, profile, validation_mode=validation_mode)
 
     TAILORED_DIR.mkdir(parents=True, exist_ok=True)
-    prefix = _prefix_for(job)
+    prefix = _prefix_for(job, variant)
 
     txt_path = TAILORED_DIR / f"{prefix}.txt"
     txt_path.write_text(tailored, encoding="utf-8")
@@ -529,7 +534,8 @@ def tailor_one_job(job: dict, validation_mode: str = "normal") -> dict:
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
 def run_tailoring(min_score: int = 7, limit: int = 20,
-                  validation_mode: str = "normal") -> dict:
+                  validation_mode: str = "normal",
+                  variant: str | None = None) -> dict:
     """Generate tailored resumes for high-scoring jobs.
 
     Args:
@@ -540,8 +546,8 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
     Returns:
         {"approved": int, "failed": int, "errors": int, "elapsed": float}
     """
-    profile = load_profile()
-    resume_text = RESUME_PATH.read_text(encoding="utf-8")
+    profile = load_profile(variant)
+    resume_text = get_resume_path(variant).read_text(encoding="utf-8")
     conn = get_connection()
 
     jobs = get_jobs_by_stage(conn=conn, stage="pending_tailor", min_score=min_score, limit=limit)
@@ -564,7 +570,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
                                              validation_mode=validation_mode)
 
             # Build safe filename prefix
-            prefix = _prefix_for(job)
+            prefix = _prefix_for(job, variant)
 
             # Save tailored resume text
             txt_path = TAILORED_DIR / f"{prefix}.txt"
