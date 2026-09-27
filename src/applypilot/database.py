@@ -485,15 +485,16 @@ def set_job_status(url: str, status: str, reason: str | None = None) -> None:
     now = datetime.now(timezone.utc).isoformat()
 
     if status == "applied":
+        # Applying clears the Focus flag: it's no longer a job "to apply to".
         conn.execute(
             "UPDATE jobs SET apply_status = 'applied', applied_at = ?, "
-            "apply_error = NULL, protected = 1 WHERE url = ?",
+            "apply_error = NULL, focused = 0, protected = 1 WHERE url = ?",
             (now, url),
         )
     elif status in OUTCOME_STATUSES:
         # Post-application outcome: keep applied_at (the job WAS applied to).
         conn.execute(
-            "UPDATE jobs SET apply_status = ?, apply_error = ?, "
+            "UPDATE jobs SET apply_status = ?, apply_error = ?, focused = 0, "
             "protected = 1 WHERE url = ?",
             (status, reason or status, url),
         )

@@ -52,6 +52,12 @@ def _build_cover_letter_prompt(profile: dict, job: dict | None = None) -> str:
     # Preferred name for the sign-off (falls back to full name)
     sign_off_name = personal.get("preferred_name") or personal.get("full_name", "")
 
+    # Candidate location, stated explicitly so the model never infers it from a
+    # project/achievement city (e.g. "Lahore" from the iRide app).
+    candidate_location = ", ".join(
+        p for p in (personal.get("city"), personal.get("country")) if p
+    ) or "the candidate's city"
+
     # Flatten all allowed skills
     all_skills: list[str] = []
     for items in boundary.values():
@@ -126,6 +132,8 @@ The candidate's real tools are ONLY: {skills_str}.
 Do NOT mention ANY tool not in this list. If the job asks for tools not listed, talk about the work you did, not the tools.
 
 LANGUAGE: Never mention language requirements or language proficiency. Do NOT name any language the job asks for and do NOT claim fluency in any language. Ignore language requirements from the posting entirely.
+
+LOCATION: The candidate is based in {candidate_location}. Never state, imply, or guess any other location for the candidate, and never treat a project, client, or past-team location as the candidate's location.
 
 Sign off: just "{sign_off_name}"
 

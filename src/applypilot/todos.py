@@ -42,12 +42,13 @@ def save_todos(todos: list[dict]) -> None:
     TODOS_PATH.write_text(json.dumps(todos, indent=2), encoding="utf-8")
 
 
-def add_todo(text: str, url: str | None = None) -> list[dict]:
+def add_todo(text: str, url: str | None = None, tag: str | None = None) -> list[dict]:
     todos = load_todos()
     todos.append({
         "id": uuid.uuid4().hex[:8],
         "text": text.strip(),
         "url": (url or "").strip(),
+        "tag": (tag or "").strip(),
         "done": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
     })

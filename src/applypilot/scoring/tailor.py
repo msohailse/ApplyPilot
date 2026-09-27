@@ -253,9 +253,14 @@ def assemble_resume_text(data: dict, profile: dict) -> str:
     lines.append(personal.get("full_name", ""))
     lines.append(sanitize_text(data.get("title", "Software Engineer")))
 
-    # Location from search config or profile -- leave blank if not available
-    # The location line is optional; the original used a hardcoded city.
-    # We omit it here; the LLM prompt can include it if the user sets it.
+    # Location -- always from the profile, never inferred from achievements.
+    # Without this line, models fall back to the only city in the resume
+    # (e.g. a project location) and misreport it as the candidate's location.
+    location_line = ", ".join(
+        p for p in (personal.get("city"), personal.get("country")) if p
+    )
+    if location_line:
+        lines.append(location_line)
 
     # Contact line
     contact_parts: list[str] = []

@@ -11,6 +11,7 @@ Generates a self-contained HTML dashboard with:
 from __future__ import annotations
 
 import os
+import shutil
 import webbrowser
 from html import escape
 from pathlib import Path
@@ -84,37 +85,59 @@ def _render_answers_html() -> str:
 
 
 def _render_todos_html() -> str:
-    """Render the todo panel (notes/tasks with optional links)."""
+    """Render the todo panel (notes/tasks with optional link + tag)."""
     todos = load_todos()
+
+    tags: list[str] = []
+    for t in todos:
+        tag = (t.get("tag") or "").strip()
+        if tag and tag not in tags:
+            tags.append(tag)
+    tags.sort(key=str.lower)
+
     items = ""
     for t in todos:
         tid = escape(t.get("id", ""))
         text = escape(t.get("text", "") or "")
         url = escape(t.get("url", "") or "")
+        tag = (t.get("tag") or "").strip()
         done = bool(t.get("done"))
         body = (
             f'<a href="{url}" target="_blank" rel="noopener">{text}</a>'
             if url else f"<span>{text}</span>"
         )
+        tag_html = f'<span class="todo-tag">{escape(tag)}</span>' if tag else ""
         checked = "checked" if done else ""
         cls = "todo-item done" if done else "todo-item"
         items += (
-            f'<li class="{cls}" data-id="{tid}">'
+            f'<li class="{cls}" data-id="{tid}" data-tag="{escape(tag)}">'
             f'<input type="checkbox" {checked} onchange="toggleTodo(this)">'
-            f'{body}'
+            f'<div class="todo-main">{body}{tag_html}</div>'
             f'<button class="todo-del" title="Delete" onclick="deleteTodo(this)">×</button>'
             f"</li>"
         )
     if not items:
         items = '<li class="todo-empty">No todos yet.</li>'
+
+    tag_options = '<option value="__all">All tags</option>'
+    for tag in tags:
+        tag_options += f'<option value="{escape(tag)}">{escape(tag)}</option>'
+    tag_datalist = "".join(f'<option value="{escape(tag)}"></option>' for tag in tags)
+
     return f"""<div class="todo-panel">
   <h3>Todo</h3>
+  <div class="todo-filter-row">
+    <span class="todo-filter-label">Filter by tag:</span>
+    <select id="todo-tag-filter" class="filter-select" onchange="filterTodos(this.value)">{tag_options}</select>
+  </div>
   <ul class="todo-list">{items}</ul>
   <div class="todo-add">
     <input id="todo-text" class="todo-input" placeholder="Add a note / task..." onkeydown="if(event.key==='Enter')addTodo()">
+    <input id="todo-tag" class="todo-input todo-tag-input" list="todo-tag-list" placeholder="tag (optional)" onkeydown="if(event.key==='Enter')addTodo()">
     <input id="todo-url" class="todo-input" placeholder="link (optional)" onkeydown="if(event.key==='Enter')addTodo()">
     <button class="todo-add-btn" onclick="addTodo()">Add</button>
   </div>
+  <datalist id="todo-tag-list">{tag_datalist}</datalist>
 </div>"""
 
 
@@ -131,7 +154,8 @@ def _job_files_html(job: dict) -> str:
             return
         items.append(
             f'<span class="file-item">'
-            f'<a class="file-link" href="/job-file?url={job_url_q}&kind={kind}" target="_blank">{label}</a>'
+            f'<a class="file-link" href="/download?url={job_url_q}&kind={kind}" '
+            f'download title="Download {label}">{label}</a>'
             f'<button class="file-x" title="Delete {label} permanently" '
             f'onclick="deleteJobFile(this, \'{kind}\', \'{label}\')">×</button>'
             f'</span>'
@@ -201,6 +225,35 @@ def _job_inbox_html(job: dict, inbox_cached: str | None) -> str:
         '<button class="mark-btn inbox-scan" onclick="scanInbox(this)">Inbox Insights</button>'
         '</div>'
     )
+
+
+def _downloads_dir(kind: str) -> Path:
+    """Per-kind downloads folder: a ``downloads`` subdir of the resume/cover dir."""
+    base = TAILORED_DIR if kind.startswith("resume") else COVER_LETTER_DIR
+    return base / "downloads"
+
+
+def _resolve_job_file_path(job_url: str, kind: str) -> "Path | None":
+    """Resolve the on-disk path for a job file kind (None if unavailable)."""
+    row = get_connection().execute(
+        "SELECT tailored_resume_path, cover_letter_path, combined_tex_path "
+        "FROM jobs WHERE url = ?",
+        (job_url,),
+    ).fetchone()
+    if not row:
+        return None
+    if kind == "resume_tex":
+        base = row[2]
+    elif kind.startswith("resume"):
+        base = row[0]
+    else:
+        base = row[1]
+    if not base:
+        return None
+    path = Path(base)
+    if kind.endswith("_pdf"):
+        path = path.with_suffix(".pdf")
+    return path.resolve()
 
 
 def render_dashboard_html() -> str:
@@ -313,7 +366,7 @@ def render_dashboard_html() -> str:
         pct = (count / max_count * 100) if max_count else 0
         score_color = "#10b981" if s >= 7 else ("#f59e0b" if s >= 5 else "#ef4444")
         score_bars += f"""
-        <div class="score-row">
+        <div class="score-row clickable" data-score="{s}" onclick="filterExactScore(this.dataset.score)" title="Show only jobs scored {s}">
           <span class="score-label">{s}</span>
           <div class="score-bar-track">
             <div class="score-bar-fill" style="width:{pct}%;background:{score_color}"></div>
@@ -328,7 +381,7 @@ def render_dashboard_html() -> str:
         color = colors.get(site, "#6b7280")
         avg = s["avg_score"] or 0
         site_rows += f"""
-        <div class="site-row">
+        <div class="site-row clickable" data-site="{escape(site)}" onclick="filterSite(this.dataset.site)" title="Show only {escape(site)} jobs">
           <div class="site-name" style="color:{color}">{escape(site)}</div>
           <div class="site-nums">{s['total']} jobs &middot; {s['high_fit']} strong fit &middot; avg score {avg}</div>
           <div class="bar-track">
@@ -516,16 +569,18 @@ def render_dashboard_html() -> str:
 
         job_sections += f"""
         <div class="job-card{focused_cls}{stale_cls}{applied_cls}{highlight_cls}" data-focused="{focused_flag}" data-highlighted="{highlight_flag}" data-stale="{stale_flag}" data-score="{score}" data-url="{escape(j['url'] or '')}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}" data-apply-status="{escape(j['apply_status'] or '')}" data-language="{('none' if not j['language_requirement'] else (j['language_requirement'] or '').lower())}" data-employment-type="{(j['employment_type'] or '').lower()}" data-country="{(j['country'] or '').lower()}" data-work-mode="{(j['work_mode'] or '').lower()}" data-company="{(j['company'] or '').lower()}">
+          {stale_btn}
           <div class="card-header">
             <span class="score-pill" style="background:{'#64748b' if score == 0 else ('#10b981' if score >= 7 else ('#f59e0b' if score >= 5 else '#ef4444'))}">{'–' if score == 0 else score}</span>
             <div class="title-block">
               <a href="{url}" class="job-title" target="_blank">{title}</a>
               {f'<div class="company-line">{company_display}</div>' if company_display else ''}
             </div>
-            {status_badge}
-            {highlight_btn}
-            {focus_btn}
-            {stale_btn}
+            <div class="card-actions">
+              {status_badge}
+              {highlight_btn}
+              {focus_btn}
+            </div>
           </div>
           <div class="meta-row">{meta_html}</div>
           {f'<div class="keywords-row">{escape(keywords)}</div>' if keywords else ''}
@@ -622,6 +677,18 @@ def render_dashboard_html() -> str:
         return f"{(100.0 * n / d):.0f}%" if d else "–"
 
     _applied_total = _n("applied", "success", "interviewing", "offer", "rejected", "no_deal")
+
+    # Recent-activity counts to keep momentum visible.
+    from datetime import date as _date, timedelta as _timedelta
+
+    _today = _date.today()
+    _today_iso = _today.isoformat()
+    _week_iso = (_today - _timedelta(days=6)).isoformat()
+    _month_iso = _today.replace(day=1).isoformat()
+    _today_n = sum(int(c) for d, c in _by_date if str(d) == _today_iso)
+    _week_n = sum(int(c) for d, c in _by_date if d and str(d) >= _week_iso)
+    _month_n = sum(int(c) for d, c in _by_date if d and str(d) >= _month_iso)
+
     _state_rows = [
         ("Applied (total)", _applied_total, "100%" if _applied_total else "–"),
         ("Interviewing", _n("interviewing"), _rate(_n("interviewing"), _applied_total)),
@@ -646,6 +713,15 @@ def render_dashboard_html() -> str:
     ) or '<tr><td colspan="2" class="muted">No applications yet</td></tr>'
     stats_html = f"""
 <div class="stats-panel">
+  <div class="report-hero">
+    <div class="report-hero-num">{_applied_total}</div>
+    <div class="report-hero-label">applications sent</div>
+    <div class="report-hero-sub">
+      <span class="rh-chip"><b>{_today_n}</b>&nbsp;today</span>
+      <span class="rh-chip"><b>{_week_n}</b>&nbsp;last 7 days</span>
+      <span class="rh-chip"><b>{_month_n}</b>&nbsp;this month</span>
+    </div>
+  </div>
   <h2>Pipeline &amp; success ratio</h2>
   <div class="stats-grid">
     <table class="stats-table">
@@ -684,6 +760,12 @@ def render_dashboard_html() -> str:
   .todo-item a {{ color: #93c5fd; text-decoration: none; }}
   .todo-item a:hover {{ text-decoration: underline; }}
   .todo-item.done a, .todo-item.done span {{ color: #64748b; text-decoration: line-through; }}
+  .todo-main {{ display: flex; flex-direction: column; min-width: 0; }}
+  .todo-tag {{ align-self: flex-start; font-size: 0.66rem; padding: 0.03rem 0.45rem;
+    border-radius: 999px; background: #1e3a5f; color: #93c5fd; border: 1px solid #60a5fa55; margin-top: 0.15rem; }}
+  .todo-filter-row {{ display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.6rem; }}
+  .todo-filter-label {{ font-size: 0.75rem; color: #94a3b8; }}
+  .todo-tag-input {{ max-width: 120px; }}
   .todo-empty {{ color: #64748b; font-size: 0.85rem; }}
   .todo-del {{ margin-left: auto; background: none; border: none; color: #64748b; cursor: pointer; font-size: 1.1rem; line-height: 1; }}
   .todo-del:hover {{ color: #ef4444; }}
@@ -753,6 +835,9 @@ def render_dashboard_html() -> str:
   /* Summary cards */
   .summary {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 2.5rem; }}
   .stat-card {{ background: #1e293b; border-radius: 12px; padding: 1.25rem; }}
+  .clickable-stat {{ cursor: pointer; transition: transform 0.15s; }}
+  .clickable-stat:hover {{ transform: translateY(-2px); box-shadow: 0 4px 12px #00000044; }}
+  .stat-applied .stat-num {{ color: #10b981; }}
   .stat-num {{ font-size: 2rem; font-weight: 700; }}
   .stat-label {{ color: #94a3b8; font-size: 0.85rem; margin-top: 0.25rem; }}
   .stat-ok .stat-num {{ color: #10b981; }}
@@ -791,6 +876,11 @@ def render_dashboard_html() -> str:
   .bar-track {{ height: 8px; background: #334155; border-radius: 4px; display: flex; overflow: hidden; }}
   .bar-fill {{ height: 100%; transition: width 0.3s; }}
 
+  /* Clickable chart rows (score bars / sources act as filters) */
+  .score-row.clickable, .site-row.clickable {{ cursor: pointer; border-radius: 6px; padding: 2px 4px; transition: background 0.15s; }}
+  .score-row.clickable:hover, .site-row.clickable:hover {{ background: #33415555; }}
+  .score-row.clickable.active, .site-row.clickable.active {{ background: #2a7ab5aa; box-shadow: inset 0 0 0 1px #60a5fa; }}
+
   /* Score group headers */
   .score-header {{ font-size: 1.2rem; font-weight: 600; margin: 2.5rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 3px solid; display: flex; align-items: center; gap: 0.75rem; }}
   .score-badge {{ display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; border-radius: 8px; color: #0f172a; font-weight: 700; font-size: 1rem; }}
@@ -798,7 +888,7 @@ def render_dashboard_html() -> str:
   /* Job grid */
   .job-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 1rem; }}
 
-  .job-card {{ background: #1e293b; border-radius: 10px; padding: 1rem; border-left: 3px solid #334155; transition: all 0.15s; }}
+  .job-card {{ position: relative; background: #1e293b; border-radius: 10px; padding: 1rem; border-left: 3px solid #334155; transition: all 0.15s; }}
   .job-card:hover {{ transform: translateY(-2px); box-shadow: 0 4px 12px #00000044; }}
   .job-card[data-score="9"], .job-card[data-score="10"] {{ border-left-color: #10b981; }}
   .job-card[data-score="8"] {{ border-left-color: #34d399; }}
@@ -809,7 +899,13 @@ def render_dashboard_html() -> str:
   .job-card[data-score="1"], .job-card[data-score="2"] {{ border-left-color: #ef444455; }}
   .job-card[data-score="0"] {{ border-left-color: #475569; }}
 
-  .card-header {{ display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }}
+  .card-header {{ display: flex; align-items: flex-start; gap: 0.5rem; margin-bottom: 0.5rem; }}
+  .card-actions {{ display: flex; flex-direction: column; align-items: flex-end; gap: 0.2rem;
+    flex-shrink: 0; margin-left: auto; padding-top: 1.15rem; }}
+  .card-actions > * {{ margin-left: 0; }}
+  .card-actions .mark-btn, .card-actions .status-badge, .card-actions .stale-x {{
+    font-size: 0.68rem; padding: 0.12rem 0.4rem; white-space: nowrap; }}
+  .card-actions .stale-x {{ font-size: 1rem; padding: 0 4px; }}
   .score-pill {{ display: inline-flex; align-items: center; justify-content: center; min-width: 1.6rem; height: 1.6rem; border-radius: 6px; color: #0f172a; font-weight: 700; font-size: 0.8rem; flex-shrink: 0; }}
 
   .job-title {{ color: #e2e8f0; text-decoration: none; font-weight: 600; font-size: 0.95rem; }}
@@ -896,13 +992,20 @@ def render_dashboard_html() -> str:
   .mark-btn.nodeal:hover {{ background: #475569; border-color: #475569; color: #fff; }}
 
   /* Manual stale (×) button + stale cards */
-  .stale-x {{ margin-left: 6px; background: transparent; border: none; color: #64748b;
-    font-size: 1.15rem; line-height: 1; cursor: pointer; padding: 0 2px; }}
+  .stale-x {{ position: absolute; top: 5px; right: 6px; margin-left: 0; z-index: 3;
+    background: transparent; border: none; color: #64748b;
+    font-size: 1.2rem; line-height: 1; cursor: pointer; padding: 0 3px; }}
   .stale-x:hover {{ color: #ef4444; }}
   .job-card.stale {{ opacity: 0.62; border-left-color: #64748b !important; }}
 
   /* Tabs */
   .tabs {{ display: flex; gap: 0.5rem; margin: 1.25rem 0 0.5rem; }}
+  .topnav {{ position: sticky; top: 0; z-index: 60; display: flex; align-items: center;
+    gap: 0.5rem; padding: 0.6rem 0.85rem; margin: 0.5rem 0 1rem;
+    background: #0f172ae6; backdrop-filter: blur(6px);
+    border: 1px solid #1e293b; border-radius: 10px; }}
+  .topnav-brand {{ font-weight: 800; font-size: 1rem; color: #93c5fd; margin-right: auto;
+    letter-spacing: 0.3px; }}
   .tab-btn {{ background: #1e293b; border: 1px solid #334155; color: #cbd5e1;
     padding: 0.45rem 1.1rem; border-radius: 8px; cursor: pointer; font-size: 0.85rem; }}
   .tab-btn:hover {{ border-color: #2a7ab5; color: #fff; }}
@@ -911,6 +1014,18 @@ def render_dashboard_html() -> str:
   /* Stats tab */
   .stats-panel {{ margin-top: 1rem; }}
   .stats-panel h2 {{ font-size: 1.1rem; margin-bottom: 0.75rem; }}
+  .report-hero {{ text-align: center; padding: 1.25rem 1rem 1.5rem; margin-bottom: 1.25rem;
+    background: radial-gradient(circle at 50% 0%, #10b98122, transparent 70%);
+    border: 1px solid #1e293b; border-radius: 14px; }}
+  .report-hero-num {{ font-size: 5rem; font-weight: 900; line-height: 1;
+    color: #10b981; text-shadow: 0 0 32px #10b98155; }}
+  .report-hero-label {{ font-size: 0.9rem; letter-spacing: 0.25em; text-transform: uppercase;
+    color: #94a3b8; margin-top: 0.5rem; }}
+  .report-hero-sub {{ display: flex; gap: 0.6rem; justify-content: center; flex-wrap: wrap;
+    margin-top: 1rem; }}
+  .rh-chip {{ font-size: 0.78rem; color: #cbd5e1; background: #1e293b;
+    border: 1px solid #334155; border-radius: 999px; padding: 0.25rem 0.8rem; }}
+  .rh-chip b {{ color: #10b981; }}
   .stats-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }}
   @media (max-width: 760px) {{ .stats-grid {{ grid-template-columns: 1fr; }} }}
   .stats-table {{ width: 100%; border-collapse: collapse; background: #1e293b;
@@ -920,6 +1035,27 @@ def render_dashboard_html() -> str:
   .stats-table th {{ color: #94a3b8; font-weight: 600; }}
   .stats-table td.num, .stats-table th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
   .stats-table .muted {{ color: #64748b; }}
+
+  /* Celebration counter on each mark */
+  .celebrate {{ position: fixed; inset: 0; display: flex; align-items: center;
+    justify-content: center; pointer-events: none; opacity: 0;
+    transition: opacity 0.25s; z-index: 9999; }}
+  .celebrate.show {{ opacity: 1; }}
+  .celebrate-card {{ background: #0f172af2; border: 2px solid #334155;
+    border-radius: 20px; padding: 1.5rem 2.75rem; text-align: center;
+    box-shadow: 0 20px 60px #000a; animation: popIn 0.25s ease-out; }}
+  .celebrate-card.win {{ border-color: #10b981;
+    box-shadow: 0 0 44px #10b98166, 0 20px 60px #000a; }}
+  .celebrate-num {{ font-size: 4.75rem; font-weight: 900; line-height: 1;
+    color: #10b981; }}
+  .celebrate-label {{ font-size: 1rem; letter-spacing: 0.25em; text-transform: uppercase;
+    color: #94a3b8; margin-top: 0.4rem; }}
+  .celebrate-sub {{ font-size: 0.85rem; color: #64748b; margin-top: 0.5rem; }}
+  @keyframes popIn {{ from {{ transform: scale(0.7); opacity: 0; }} to {{ transform: scale(1); opacity: 1; }} }}
+  .confetti-piece {{ position: fixed; top: -20px; width: 9px; height: 14px;
+    z-index: 10000; pointer-events: none; border-radius: 2px;
+    animation: confettiFall linear forwards; }}
+  @keyframes confettiFall {{ to {{ transform: translateY(105vh) rotate(720deg); opacity: 0; }} }}
   .lang-flag {{ margin: 0.5rem 0 0.1rem; }}
   .lang-flag-tag {{ font-size: 0.72rem; padding: 0.2rem 0.55rem; border-radius: 6px; font-weight: 600; display: inline-block; }}
   .lang-flag-tag.req {{ background: #7c2d12; color: #fdba74; }}
@@ -959,12 +1095,15 @@ def render_dashboard_html() -> str:
   <div class="stat-card stat-ok"><div class="stat-num">{ready}</div><div class="stat-label">Ready (desc + URL)</div></div>
   <div class="stat-card stat-scored"><div class="stat-num">{scored}</div><div class="stat-label">Scored by LLM</div></div>
   <div class="stat-card stat-high"><div class="stat-num">{high_fit}</div><div class="stat-label">Strong Fit (7+)</div></div>
+  <div class="stat-card stat-applied clickable-stat" onclick="quickStatus('applied')" title="Show applied jobs">
+    <div class="stat-num">{_applied_total}</div><div class="stat-label">Applied</div></div>
 </div>
 
-<div class="tabs">
+<nav class="topnav">
+  <span class="topnav-brand">ApplyPilot</span>
   <button class="tab-btn active" data-tab="jobs" onclick="showTab('jobs', event)">Jobs</button>
-  <button class="tab-btn" data-tab="stats" onclick="showTab('stats', event)">Stats</button>
-</div>
+  <button class="tab-btn" data-tab="stats" onclick="showTab('stats', event)">Report</button>
+</nav>
 
 <div id="tab-jobs">
 <div class="filters">
@@ -1013,7 +1152,7 @@ def render_dashboard_html() -> str:
 </div>
 
 <div class="score-section">
-  <details class="score-dist" open>
+  <details class="score-dist">
     <summary>Score Distribution</summary>
     {score_bars}
   </details>
@@ -1071,6 +1210,8 @@ let countryFilter = 'any';
 let workModeFilter = 'any';
 let companyFilter = '';
 let focusFilter = false;
+let exactScore = null;
+let siteFilter = '';
 
 // Persist the active filter set (and tab) so a reload -- e.g. right after
 // generating a document -- keeps you exactly where you were.
@@ -1082,6 +1223,7 @@ function saveFilters() {{
     localStorage.setItem(FILTER_KEY, JSON.stringify({{
       minScore, searchText, statusFilter, langFilter, typeFilter,
       countryFilter, workModeFilter, companyFilter, focusFilter,
+      exactScore, siteFilter,
     }}));
   }} catch (e) {{}}
 }}
@@ -1099,6 +1241,8 @@ function restoreFilters() {{
   if (typeof s.workModeFilter === 'string') workModeFilter = s.workModeFilter;
   if (typeof s.companyFilter === 'string') companyFilter = s.companyFilter;
   focusFilter = !!s.focusFilter;
+  exactScore = (typeof s.exactScore === 'number') ? s.exactScore : null;
+  if (typeof s.siteFilter === 'string') siteFilter = s.siteFilter;
 }}
 
 function restoreFilterUI() {{
@@ -1111,6 +1255,10 @@ function restoreFilterUI() {{
   document.querySelectorAll('.mode-btn').forEach(b =>
     b.classList.toggle('active', (b.getAttribute('onclick') || '').includes("filterWorkMode('" + workModeFilter + "'")));
   document.querySelectorAll('.focus-filter-btn').forEach(b => b.classList.toggle('active', focusFilter));
+  document.querySelectorAll('.score-row.clickable').forEach(r =>
+    r.classList.toggle('active', exactScore !== null && parseInt(r.dataset.score, 10) === exactScore));
+  document.querySelectorAll('.site-row.clickable').forEach(r =>
+    r.classList.toggle('active', !!siteFilter && (r.dataset.site || '').toLowerCase() === siteFilter.toLowerCase()));
   const ls = document.getElementById('lang-select'); if (ls) ls.value = langFilter;
   const cs = document.getElementById('country-select'); if (cs) cs.value = countryFilter;
   const si = document.getElementById('search-input'); if (si) si.value = searchText;
@@ -1119,8 +1267,28 @@ function restoreFilterUI() {{
 
 function filterScore(min) {{
   minScore = min;
+  exactScore = null;
   document.querySelectorAll('.score-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.score-row.clickable').forEach(r => r.classList.remove('active'));
   event.target.classList.add('active');
+  applyFilters();
+}}
+
+function filterExactScore(val) {{
+  const s = parseInt(val, 10);
+  exactScore = (exactScore === s) ? null : s;
+  minScore = -1;
+  document.querySelectorAll('.score-btn').forEach(b => b.classList.toggle('active', b.textContent.trim() === 'All'));
+  document.querySelectorAll('.score-row.clickable').forEach(r =>
+    r.classList.toggle('active', exactScore !== null && parseInt(r.dataset.score, 10) === exactScore));
+  applyFilters();
+}}
+
+function filterSite(val) {{
+  const v = (val || '').trim();
+  siteFilter = (siteFilter && siteFilter.toLowerCase() === v.toLowerCase()) ? '' : v;
+  document.querySelectorAll('.site-row.clickable').forEach(r =>
+    r.classList.toggle('active', !!siteFilter && (r.dataset.site || '').toLowerCase() === siteFilter.toLowerCase()));
   applyFilters();
 }}
 
@@ -1180,7 +1348,15 @@ async function postMark(card, status, reason) {{
     if (data.ok) {{
       const newStatus = (status === 'reset' ? '' : status);
       card.dataset.applyStatus = newStatus;
-      card.classList.toggle('is-applied', ['applied', 'success', 'interviewing', 'offer', 'rejected', 'no_deal'].includes(newStatus));
+      const appliedNow = ['applied', 'success', 'interviewing', 'offer', 'rejected', 'no_deal'].includes(newStatus);
+      card.classList.toggle('is-applied', appliedNow);
+      // Applying (or logging an outcome) auto-clears Focus.
+      if (appliedNow) {{
+        card.dataset.focused = '0';
+        card.classList.remove('focused');
+        const fb = card.querySelector('.mark-btn.focus');
+        if (fb) {{ fb.classList.remove('active'); fb.textContent = 'Focus'; }}
+      }}
       setStatusBadge(card, newStatus);
       const badge = card.querySelector('.status-badge');
       if (badge) badge.title = reason || '';
@@ -1190,6 +1366,7 @@ async function postMark(card, status, reason) {{
       // Re-apply the CURRENT filters (they stay selected) so the job moves out
       // of the view if it no longer matches, without a page reload.
       applyFilters();
+      if (newStatus) celebrate(newStatus);
       return true;
     }}
     alert('Failed to update: ' + (data.error || 'unknown'));
@@ -1197,6 +1374,51 @@ async function postMark(card, status, reason) {{
     alert('Could not reach the dashboard server.\\nStart it with: applypilot dashboard');
   }}
   return false;
+}}
+
+function _countStatuses() {{
+  const appliedSet = ['applied', 'success', 'interviewing', 'offer', 'rejected', 'no_deal'];
+  let applied = 0, total = 0;
+  document.querySelectorAll('.job-card').forEach(c => {{
+    total++;
+    if (appliedSet.includes(c.dataset.applyStatus || '')) applied++;
+  }});
+  return {{ applied: applied, other: total - applied }};
+}}
+
+function _confetti() {{
+  const colors = ['#10b981', '#f59e0b', '#60a5fa', '#ef4444', '#a78bfa', '#34d399'];
+  for (let i = 0; i < 44; i++) {{
+    const p = document.createElement('div');
+    p.className = 'confetti-piece';
+    p.style.left = (Math.random() * 100) + 'vw';
+    p.style.background = colors[Math.floor(Math.random() * colors.length)];
+    p.style.animationDelay = (Math.random() * 0.4) + 's';
+    p.style.animationDuration = (1.3 + Math.random() * 1.2) + 's';
+    document.body.appendChild(p);
+    setTimeout(() => p.remove(), 3200);
+  }}
+}}
+
+function celebrate(kind) {{
+  const c = _countStatuses();
+  let host = document.getElementById('celebrate');
+  if (!host) {{
+    host = document.createElement('div');
+    host.id = 'celebrate';
+    host.className = 'celebrate';
+    document.body.appendChild(host);
+  }}
+  const win = (kind === 'applied' || kind === 'success') ? ' win' : '';
+  host.innerHTML = '<div class="celebrate-card' + win + '">' +
+    '<div class="celebrate-num">' + c.applied + '</div>' +
+    '<div class="celebrate-label">Applied</div>' +
+    '<div class="celebrate-sub">vs ' + c.other + ' other' + (c.other === 1 ? '' : 's') + '</div>' +
+    '</div>';
+  host.classList.add('show');
+  if (win) _confetti();
+  clearTimeout(window._celebrateTimer);
+  window._celebrateTimer = setTimeout(() => host.classList.remove('show'), 2200);
 }}
 
 async function markJob(btn, status) {{
@@ -1479,6 +1701,20 @@ function showTab(name, event) {{
   try {{ localStorage.setItem(TAB_KEY, name); }} catch (e) {{}}
 }}
 
+function quickStatus(val) {{
+  // Jump to the Jobs tab showing a single status (e.g. Applied card click).
+  showTab('jobs');
+  statusFilter = val;
+  focusFilter = false; siteFilter = ''; exactScore = null; minScore = -1;
+  document.querySelectorAll('.focus-filter-btn, .score-row.clickable, .site-row.clickable')
+    .forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.score-btn').forEach(b =>
+    b.classList.toggle('active', b.textContent.trim() === 'All'));
+  document.querySelectorAll('.status-btn').forEach(b =>
+    b.classList.toggle('active', (b.getAttribute('onclick') || '').includes("filterStatus('" + val + "'"))));
+  applyFilters();
+}}
+
 let _reasonCard = null;
 function openReasonModal(card) {{
   _reasonCard = card;
@@ -1514,24 +1750,51 @@ function _todoLi(item) {{
   const li = document.createElement('li');
   li.className = 'todo-item';
   li.dataset.id = item.id;
+  li.dataset.tag = item.tag || '';
   const body = item.url
     ? '<a href="' + escapeHtml(item.url) + '" target="_blank" rel="noopener">' + escapeHtml(item.text) + '</a>'
     : '<span>' + escapeHtml(item.text) + '</span>';
-  li.innerHTML = '<input type="checkbox" onchange="toggleTodo(this)">' + body +
+  const tagHtml = item.tag ? '<span class="todo-tag">' + escapeHtml(item.tag) + '</span>' : '';
+  li.innerHTML = '<input type="checkbox" onchange="toggleTodo(this)">' +
+    '<div class="todo-main">' + body + tagHtml + '</div>' +
     '<button class="todo-del" title="Delete" onclick="deleteTodo(this)">×</button>';
   return li;
 }}
 
+function _addTodoTagOption(tag) {{
+  const sel = document.getElementById('todo-tag-filter');
+  if (sel && ![...sel.options].some(o => o.value === tag)) {{
+    const o = document.createElement('option'); o.value = tag; o.textContent = tag; sel.appendChild(o);
+  }}
+  const dl = document.getElementById('todo-tag-list');
+  if (dl && ![...dl.options].some(o => o.value === tag)) {{
+    const o = document.createElement('option'); o.value = tag; dl.appendChild(o);
+  }}
+}}
+
+function filterTodos(val) {{
+  const want = val || '__all';
+  document.querySelectorAll('.todo-item').forEach(li => {{
+    const tag = li.dataset.tag || '';
+    li.style.display = (want === '__all' || tag === want) ? '' : 'none';
+  }});
+}}
+
 async function addTodo() {{
   const t = document.getElementById('todo-text');
+  const g = document.getElementById('todo-tag');
   const u = document.getElementById('todo-url');
   const text = (t.value || '').trim();
   if (!text) return;
+  const tag = (g ? g.value : '').trim();
   try {{
-    const data = await postJSON('/todo/add', {{text: text, url: (u.value || '').trim()}});
+    const data = await postJSON('/todo/add', {{text: text, url: (u.value || '').trim(), tag: tag}});
     if (data.ok && data.item) {{
       document.querySelector('.todo-list').appendChild(_todoLi(data.item));
-      t.value = ''; u.value = '';
+      if (data.item.tag) _addTodoTagOption(data.item.tag);
+      t.value = ''; if (g) g.value = ''; u.value = '';
+      const sel = document.getElementById('todo-tag-filter');
+      filterTodos(sel ? sel.value : '__all');
     }} else {{ alert('Failed: ' + (data.error || 'unknown')); }}
   }} catch (e) {{ alert('Could not reach the dashboard server.'); }}
 }}
@@ -1701,7 +1964,9 @@ function resetCompany() {{
 function resetAllFilters() {{
   minScore = -1; searchText = ''; statusFilter = 'not_applied';
   langFilter = 'any'; typeFilter = 'any'; countryFilter = 'any'; workModeFilter = 'any'; companyFilter = ''; focusFilter = false;
+  exactScore = null; siteFilter = '';
   document.querySelectorAll('.focus-filter-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.score-row.clickable, .site-row.clickable').forEach(r => r.classList.remove('active'));
   document.querySelectorAll('.score-btn').forEach(b => b.classList.toggle('active', b.textContent.trim() === 'All'));
   document.querySelectorAll('.status-btn').forEach(b => b.classList.toggle('active', b.textContent.trim() === 'Not Applied'));
   document.querySelectorAll('.type-btn').forEach(b => b.classList.toggle('active', b.textContent.trim() === 'Any'));
@@ -1726,7 +1991,7 @@ function applyFilters() {{
     const country = card.dataset.country || '';
     const company = card.dataset.company || '';
     const mode = card.dataset.workMode || '';
-    const scoreMatch = minScore < 0 || score >= minScore;
+    const scoreMatch = exactScore !== null ? (score === exactScore) : (minScore < 0 || score >= minScore);
     const textMatch = !searchText || text.includes(searchText);
     
     const stale = card.dataset.stale === '1';
@@ -1762,8 +2027,10 @@ function applyFilters() {{
     const modeMatch = workModeFilter === 'any' || mode === workModeFilter;
     const companyMatch = !companyFilter || company.includes(companyFilter);
     const focusMatch = !focusFilter || card.dataset.focused === '1';
+    const site = (card.dataset.site || '').toLowerCase();
+    const siteMatch = !siteFilter || site === siteFilter.toLowerCase();
 
-    if (scoreMatch && textMatch && statusMatch && langMatch && typeMatch && countryMatch && modeMatch && companyMatch && focusMatch) {{
+    if (scoreMatch && textMatch && statusMatch && langMatch && typeMatch && countryMatch && modeMatch && companyMatch && focusMatch && siteMatch) {{
       card.classList.remove('hidden');
       shown++;
     }} else {{
@@ -1933,10 +2200,52 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                 "highlighted": int(job.get("highlighted") or 0),
             })
 
+        def _serve_download(self, query: str) -> None:
+            """Force-download a job file, keeping a copy in the per-kind
+            ``downloads`` folder (first attempt); fall back to the original so
+            the download always succeeds."""
+            params = parse_qs(query)
+            job_url = (params.get("url") or [""])[0]
+            kind = (params.get("kind") or [""])[0]
+            valid = ("resume_pdf", "resume_txt", "resume_tex", "cover_pdf", "cover_txt")
+            if not job_url or kind not in valid:
+                self._send(400, b"Bad request", "text/plain")
+                return
+            src = _resolve_job_file_path(job_url, kind)
+            allowed_dirs = (TAILORED_DIR.resolve(), COVER_LETTER_DIR.resolve())
+            if not src or not any(
+                str(src).startswith(str(d) + os.sep) for d in allowed_dirs
+            ):
+                self._send(404, b"No file for this job", "text/plain")
+                return
+            if not src.exists():
+                self._send(404, b"File missing on disk", "text/plain")
+                return
+            serve_path = src
+            try:
+                ddir = _downloads_dir(kind)
+                ddir.mkdir(parents=True, exist_ok=True)
+                dest = ddir / src.name
+                if not dest.exists() or dest.stat().st_mtime < src.stat().st_mtime:
+                    shutil.copy2(src, dest)
+                serve_path = dest
+            except Exception:  # noqa: BLE001 - never block the download
+                serve_path = src
+            body = serve_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{src.name}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
             parsed = urlparse(self.path)
             if parsed.path == "/job-file":
                 self._serve_job_file(parsed.query)
+                return
+            if parsed.path == "/download":
+                self._serve_download(parsed.query)
                 return
             if parsed.path == "/card-state":
                 self._serve_card_state(parsed.query)
@@ -1978,7 +2287,7 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                 if not text:
                     self._json({"ok": False, "error": "text required"})
                     return
-                todos = add_todo(text, data.get("url"))
+                todos = add_todo(text, data.get("url"), data.get("tag"))
                 self._json({"ok": True, "item": todos[-1]})
             elif path == "/todo/toggle":
                 from applypilot.todos import toggle_todo
@@ -2113,6 +2422,10 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                 try:
                     if target.exists():
                         target.unlink()
+                    # Keep the downloads copy in sync.
+                    dcopy = _downloads_dir(kind) / target.name
+                    if dcopy.exists():
+                        dcopy.unlink()
                 except OSError as exc:
                     self._json({"ok": False, "error": str(exc)})
                     return
