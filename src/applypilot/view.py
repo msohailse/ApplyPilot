@@ -323,7 +323,7 @@ def render_dashboard_html() -> str:
     jobs = conn.execute("""
         SELECT url, title, salary, description, location, site, strategy,
                full_description, application_url, detail_error,
-               fit_score, score_reasoning, apply_status,
+               fit_score, score_reasoning, apply_status, applied_at,
                language_requirement, employment_type, country, work_mode,
                tailored_resume_path, combined_tex_path, cover_letter_path, notes, apply_error, company, study_note,
                focused, stale, highlighted, highlight_concepts
