@@ -2075,7 +2075,6 @@ def serve_dashboard(port: int = 8765, open_browser: bool = True) -> None:
                     job = dict(row)
                     existing = []
                     try:
-                        import json as _json
                         existing = _json.loads(job.get("highlight_concepts") or "[]")
                     except (ValueError, TypeError):
                         existing = []
