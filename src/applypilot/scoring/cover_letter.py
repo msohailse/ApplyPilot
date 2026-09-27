@@ -19,6 +19,7 @@ from applypilot.config import (
     get_resume_path,
     load_env,
     load_profile,
+    output_prefix,
 )
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
@@ -157,14 +158,8 @@ Start DIRECTLY with "Dear Hiring Manager," and end with the name."""
 
 
 def _prefix_for(job: dict, variant: str | None = None) -> str:
-    """Build the ``[variant_]Company_Title`` prefix for cover-letter outputs."""
-    safe_title = re.sub(r"[^\w\s-]", "", job.get("title") or "role")[:50].strip().replace(" ", "_")
-    safe_site = re.sub(r"[^\w\s-]", "", job.get("site") or "company")[:20].strip().replace(" ", "_")
-    base = f"{safe_site}_{safe_title}"
-    if variant:
-        safe_variant = re.sub(r"[^\w-]", "", variant)[:20]
-        return f"{safe_variant}_{base}"
-    return base
+    """Build the ``cover_letter_<name>[_variant]_Title`` prefix for outputs."""
+    return output_prefix("cover_letter", job, variant)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -318,7 +313,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
             # Build safe filename prefix
             prefix = _prefix_for(job, variant)
 
-            cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
+            cl_path = COVER_LETTER_DIR / f"{prefix}.txt"
             cl_path.write_text(letter, encoding="utf-8")
 
             # Generate PDF (best-effort)
@@ -412,7 +407,7 @@ def generate_one_cover_letter(
 
     COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
     prefix = _prefix_for(job, variant)
-    cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
+    cl_path = COVER_LETTER_DIR / f"{prefix}.txt"
     cl_path.write_text(letter, encoding="utf-8")
 
     pdf_path = None

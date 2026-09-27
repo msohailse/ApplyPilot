@@ -372,7 +372,11 @@ p:last-child {{ margin-bottom: 0; }}
 
 def is_cover_letter(path: Path, text: str) -> bool:
     """Heuristic: is this text file a cover letter rather than a resume?"""
-    return path.name.endswith("_CL.txt") or text.lstrip().lower().startswith("dear ")
+    return (
+        path.name.endswith("_CL.txt")
+        or path.name.startswith("cover_letter_")
+        or text.lstrip().lower().startswith("dear ")
+    )
 
 
 # ── PDF Renderer ─────────────────────────────────────────────────────────
@@ -457,7 +461,9 @@ def batch_convert(limit: int = 50) -> int:
     # (they get their own conversion calls)
     candidates = [
         f for f in txt_files
-        if not f.name.endswith("_JOB.txt") and not f.name.endswith("_CL.txt")
+        if not f.name.endswith("_JOB.txt")
+        and not f.name.endswith("_CL.txt")
+        and not f.name.startswith("cover_letter_")
     ]
 
     # Filter to those without a corresponding PDF

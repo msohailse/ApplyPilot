@@ -16,7 +16,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from applypilot.config import RESUME_PATH, TAILORED_DIR, get_resume_path, load_profile
+from applypilot.config import (
+    RESUME_PATH, TAILORED_DIR, get_resume_path, load_profile, output_prefix,
+)
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
@@ -33,14 +35,8 @@ MAX_ATTEMPTS = 5  # max cross-run retries before giving up
 
 
 def _prefix_for(job: dict, variant: str | None = None) -> str:
-    """Build the ``[variant_]Company_Title`` filename prefix for tailored outputs."""
-    safe_title = re.sub(r"[^\w\s-]", "", job.get("title") or "role")[:50].strip().replace(" ", "_")
-    safe_site = re.sub(r"[^\w\s-]", "", job.get("site") or "company")[:20].strip().replace(" ", "_")
-    base = f"{safe_site}_{safe_title}"
-    if variant:
-        safe_variant = re.sub(r"[^\w-]", "", variant)[:20]
-        return f"{safe_variant}_{base}"
-    return base
+    """Build the ``resume_<name>[_variant]_Title`` prefix for tailored outputs."""
+    return output_prefix("resume", job, variant)
 
 
 # ── Prompt Builders (profile-driven) ──────────────────────────────────────

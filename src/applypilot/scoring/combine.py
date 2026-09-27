@@ -20,7 +20,9 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from applypilot.config import TAILORED_DIR, get_base_resume_tex, load_env
+from applypilot.config import (
+    TAILORED_DIR, get_base_resume_tex, load_env, output_prefix,
+)
 from applypilot.database import get_connection
 from applypilot.llm import get_client
 
@@ -39,14 +41,8 @@ _PDFLATEX_FALLBACKS = (
 
 
 def _safe_prefix(job: dict, variant: str | None = None) -> str:
-    """Build a filesystem-safe ``[variant_]Company_Title`` prefix for outputs."""
-    safe_title = re.sub(r"[^\w\s-]", "", job.get("title") or "role")[:50].strip().replace(" ", "_")
-    safe_site = re.sub(r"[^\w\s-]", "", job.get("site") or "company")[:20].strip().replace(" ", "_")
-    base = f"{safe_site}_{safe_title}"
-    if variant:
-        safe_variant = re.sub(r"[^\w-]", "", variant)[:20]
-        return f"{safe_variant}_{base}"
-    return base
+    """Build the ``resume_<name>[_variant]_Title`` prefix for combined outputs."""
+    return output_prefix("resume", job, variant)
 
 
 def _extract_latex(raw: str) -> str:

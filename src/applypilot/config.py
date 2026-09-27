@@ -298,6 +298,51 @@ def load_profile(variant: str | None = None) -> dict:
     return profile
 
 
+def name_token() -> str:
+    """Short personal token used in generated filenames (e.g. "msohail").
+
+    Reads ``personal.filename_name`` from the profile, else derives it from the
+    email local part, else falls back to the full name.
+    """
+    import json
+    import re
+
+    token = ""
+    try:
+        profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+        personal = profile.get("personal", {}) or {}
+        token = str(personal.get("filename_name") or "").strip()
+        if not token:
+            email = str(personal.get("email") or "")
+            if "@" in email:
+                token = email.split("@", 1)[0].split(".")[0]
+        if not token:
+            token = str(personal.get("full_name") or "")
+    except (OSError, ValueError):
+        token = ""
+    token = re.sub(r"[^\w-]", "", token).strip("_")
+    return token[:30] or "resume"
+
+
+def output_prefix(kind: str, job: dict, variant: str | None = None) -> str:
+    """Filesystem-safe prefix like ``resume_msohail_italy_Senior_Engineer``.
+
+    ``kind`` is the leading token, e.g. ``resume`` or ``cover_letter``.
+    """
+    import re
+
+    def _slug(value, maxlen):
+        return (
+            re.sub(r"[^\w\s-]", "", str(value or ""))[:maxlen].strip().replace(" ", "_")
+        )
+
+    parts = [kind, name_token()]
+    if variant:
+        parts.append(re.sub(r"[^\w-]", "", variant)[:20])
+    parts.append(_slug(job.get("title") or "role", 50))
+    return "_".join(p for p in parts if p)
+
+
 def load_search_config() -> dict:
     """Load search configuration from ~/.applypilot/searches.yaml."""
     import yaml
