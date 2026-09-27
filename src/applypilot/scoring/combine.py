@@ -192,7 +192,9 @@ def combine_resume(job: dict, extra: str = "", variant: str | None = None) -> di
         from applypilot.scoring.tailor import tailor_one_job
 
         log.info("No tailored resume for %r yet; tailoring on demand...", job.get("title"))
-        tailored_path = tailor_one_job(job, validation_mode="normal", variant=variant)["path"]
+        tailored_path = tailor_one_job(
+            job, validation_mode="normal", variant=variant, extra=extra,
+        )["path"]
 
     base = get_base_resume_tex(variant)
     if base is None:

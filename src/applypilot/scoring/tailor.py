@@ -365,6 +365,7 @@ def judge_tailored_resume(
 def tailor_resume(
     resume_text: str, job: dict, profile: dict,
     max_retries: int = 3, validation_mode: str = "normal",
+    extra: str = "",
 ) -> tuple[str, dict]:
     """Generate a tailored resume via JSON output + fresh context on each retry.
 
@@ -402,6 +403,12 @@ def tailor_resume(
     tailored = ""
     client = get_client("tailor")
     tailor_prompt_base = _build_tailor_prompt(profile)
+    extra = (extra or "").strip()
+    if extra:
+        tailor_prompt_base += (
+            "\n\n## ADDITIONAL INSTRUCTIONS FROM THE CANDIDATE (follow these on "
+            "top of everything above, without breaking any of the rules):\n" + extra
+        )
 
     for attempt in range(max_retries + 1):
         report["attempts"] = attempt + 1
@@ -474,7 +481,7 @@ def tailor_resume(
 # ── On-demand (single job) ───────────────────────────────────────────────
 
 def tailor_one_job(job: dict, validation_mode: str = "normal",
-                   variant: str | None = None) -> dict:
+                   variant: str | None = None, extra: str = "") -> dict:
     """Tailor and persist a single job's resume, on demand.
 
     Per-job equivalent of ``run_tailoring`` used by Combine Resume so a job can
@@ -487,7 +494,9 @@ def tailor_one_job(job: dict, validation_mode: str = "normal",
     profile = load_profile(variant)
     resume_text = get_resume_path(variant).read_text(encoding="utf-8")
 
-    tailored, report = tailor_resume(resume_text, job, profile, validation_mode=validation_mode)
+    tailored, report = tailor_resume(
+        resume_text, job, profile, validation_mode=validation_mode, extra=extra,
+    )
 
     TAILORED_DIR.mkdir(parents=True, exist_ok=True)
     prefix = _prefix_for(job, variant)
