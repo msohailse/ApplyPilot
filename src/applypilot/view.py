@@ -361,8 +361,22 @@ def _job_inbox_html(job: dict, inbox_cached: str | None) -> str:
 _URL_RE = re.compile(r"(https?://[^\s<>\"')]+)")
 
 
+def _short_url(url: str) -> str:
+    """A short, readable label for a long URL (host + first path segment)."""
+    try:
+        p = urlparse(url)
+        host = (p.netloc or "").replace("www.", "")
+        seg = (p.path or "").strip("/").split("/")[0]
+        if seg:
+            seg = seg[:20] + ("..." if len(seg) > 20 else "")
+            return f"{host}/{seg}"
+        return host or url[:40]
+    except Exception:
+        return url[:40]
+
+
 def _linkify(text: str) -> str:
-    """Escape text but turn bare URLs into clickable links."""
+    """Escape text but turn URLs into short, clickable links."""
     text = text or ""
     out = []
     last = 0
@@ -370,7 +384,8 @@ def _linkify(text: str) -> str:
         out.append(escape(text[last:m.start()]))
         url = m.group(1)
         out.append(
-            f'<a href="{escape(url)}" target="_blank" rel="noopener">{escape(url)}</a>'
+            f'<a href="{escape(url)}" target="_blank" rel="noopener" '
+            f'title="{escape(url)}">{escape(_short_url(url))}</a>'
         )
         last = m.end()
     out.append(escape(text[last:]))

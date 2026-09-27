@@ -240,11 +240,6 @@ def _html_to_text(html: str) -> str:
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup(["script", "style", "img", "head"]):
             tag.decompose()
-        # Keep link targets visible next to their text.
-        for a in soup.find_all("a"):
-            href = (a.get("href") or "").strip()
-            if href.startswith("http") and href not in (a.get_text() or ""):
-                a.append(f" ({href})")
         text = soup.get_text("\n")
         text = re.sub(r"[ \t]+\n", "\n", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
