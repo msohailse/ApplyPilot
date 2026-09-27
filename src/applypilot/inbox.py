@@ -180,6 +180,8 @@ def _build_query(job: dict, label: str) -> str:
         "(applied OR application OR interview OR recruiter OR assessment OR "
         "offer OR schedule OR scheduling OR \"next steps\" OR position OR candidacy)"
     )
+    # Never surface marketing / social noise (e.g. bank promos match "application").
+    noise = "-category:promotions -category:social -category:forums -in:chats"
     parts = []
     if label:
         parts.append(f'label:"{label}"')
@@ -200,6 +202,7 @@ def _build_query(job: dict, label: str) -> str:
         elif name:
             parts.append(f'"{name}"')
     parts.append(keywords)
+    parts.append(noise)
     return " ".join(parts)
 
 
@@ -304,8 +307,11 @@ def _thread_text(messages: list[dict]) -> str:
 # ── LLM action-item extraction ───────────────────────────────────────────
 
 _ACTION_PROMPT = """You read a candidate's email thread about a job application \
-and extract only what is actionable. Never invent facts. If the emails are \
-irrelevant to this company/role, say so plainly.
+and extract only what is actionable. Never invent facts.
+
+If the emails are not genuinely about THIS job application (for example bank, \
+retail or travel promotions, newsletters, or unrelated notifications), reply \
+with exactly the single word: NONE
 
 Output a short plain-text brief using ONLY these labels (omit empty ones):
 STATUS: one line (applied, screening, interview scheduled, assessment, rejection, offer, waiting)
@@ -395,11 +401,17 @@ def scan_and_cache(job: dict, max_results: int = 8) -> dict:
     messages = fetch_company_messages(job, max_results=max_results)
     summary = summarize_thread(job, messages)
     category = _category_from_summary(summary)
-    if not messages:
+    if not messages or (summary or "").strip().upper().startswith("NONE"):
         category = "none"
+    if category == "none":
+        # Don't cache misleading promo text; keep it clean and honest.
+        summary = "No job-related emails found for this role."
+        thread_text = ""
+    else:
+        thread_text = _thread_text(messages)
     message_ids = ",".join(m["id"] for m in messages)
     save_inbox_cache(
-        job["url"], message_ids, _thread_text(messages), summary,
+        job["url"], message_ids, thread_text, summary,
         resolve_model("inbox") or "", category,
     )
 
