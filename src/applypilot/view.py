@@ -25,6 +25,7 @@ from applypilot.config import (
     TAILORED_DIR,
     COVER_LETTER_DIR,
     list_resume_variants,
+    load_profile,
 )
 from applypilot.database import (
     ensure_columns, get_connection, get_inbox_summaries, get_study_jobs,
@@ -648,7 +649,12 @@ def render_dashboard_html() -> str:
         f'<option value="{escape(c)}"></option>' for c in company_values
     )
 
-    variant_options = '<option value="">Default</option>'
+    try:
+        _base_country = (load_profile().get("personal", {}) or {}).get("country", "")
+    except Exception:  # noqa: BLE001 - profile missing is non-fatal for rendering
+        _base_country = ""
+    _default_variant_label = f"Default ({_base_country})" if _base_country else "Default"
+    variant_options = f'<option value="">{escape(_default_variant_label)}</option>'
     for _v in list_resume_variants():
         variant_options += f'<option value="{escape(_v)}">{escape(_v)}</option>'
 

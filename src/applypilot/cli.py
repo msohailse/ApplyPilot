@@ -457,6 +457,61 @@ def cover_letter(
         console.print(f"[green]PDF:[/green]          {result['pdf_path']}")
 
 
+@app.command("variant-add")
+def variant_add(
+    name: str = typer.Argument(..., help="Variant/country name, e.g. italy."),
+    phone: str = typer.Option(..., "--phone", help="Phone number for this variant."),
+    city: str = typer.Option(..., "--city", help="City for this variant."),
+    country: str = typer.Option(..., "--country", help="Country for this variant."),
+    province: str = typer.Option("", "--province", help="Province/state (optional)."),
+    postal: str = typer.Option("", "--postal", help="Postal code (optional)."),
+    source_url: str = typer.Option(
+        "", "--source-url",
+        help="Where the variant's base files live "
+             "(default https://msohail.work/resume/<name>).",
+    ),
+) -> None:
+    """Create a resume variant (any country) with its own phone + location.
+
+    Writes a profile override and tries to fetch the variant's base files
+    (resume.txt/tex/pdf) from --source-url. Select it in the dashboard's
+    "Resume" dropdown, or pass `--variant <name>` on run/combine/cover-letter.
+    """
+    import json
+
+    _bootstrap()
+    from applypilot.config import RESUME_VARIANTS_DIR, ensure_variant_files
+
+    safe_name = "".join(ch for ch in name.strip().lower() if ch.isalnum() or ch in "-_")
+    if not safe_name:
+        console.print("[red]Invalid variant name.[/red]")
+        raise typer.Exit(1)
+
+    vdir = RESUME_VARIANTS_DIR / safe_name
+    vdir.mkdir(parents=True, exist_ok=True)
+    profile = {
+        "source_url": (source_url or f"https://msohail.work/resume/{safe_name}").rstrip("/"),
+        "personal": {
+            "phone": phone,
+            "city": city,
+            "province_state": province,
+            "country": country,
+            "postal_code": postal,
+        },
+    }
+    (vdir / "profile.json").write_text(json.dumps(profile, indent=2), encoding="utf-8")
+    ensure_variant_files(safe_name)
+
+    have = sorted(p.name for p in vdir.iterdir())
+    console.print(f"[green]Variant '{safe_name}' created[/green] at {vdir}")
+    console.print(f"[dim]Files: {', '.join(have)}[/dim]")
+    if "resume.txt" not in have:
+        console.print(
+            "[yellow]No resume.txt yet — add/host the base files at "
+            f"{profile['source_url']} or drop them in the folder.[/yellow]"
+        )
+
+
 @app.command()
 def gmail_auth() -> None:
     """Authorize read-only Gmail access (one-time OAuth). Never sends or deletes."""
